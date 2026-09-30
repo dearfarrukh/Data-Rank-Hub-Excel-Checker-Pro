@@ -1,33 +1,92 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
+from modules.audit_log import make_audit_entry
+from modules.correction_manager import (
+    FORCE_REASONS,
+    add_resolution,
+    apply_manual_value,
+    build_force_override,
+)
 from modules.error_checker import CheckerConfig, run_core_checks
+from modules.export_manager import build_audit_report_bytes, build_corrected_workbook_bytes
 from modules.file_reader import get_sheet_names, read_table
 from modules.lifecycle import build_lifecycle_summary, load_lifecycle_rules
 from modules.orientation import detect_orientation, normalize_to_checker
-from modules.ranking_engine import build_top_n_risk_table, classify_top_n_safety
-from modules.report_builder import build_action_table, category_summary, final_status, severity_counts
+from modules.ranking_engine import build_top_n_risk_table
+from modules.report_builder import build_action_table
+from modules.review_manager import (
+    add_ranking_context,
+    apply_resolutions,
+    clean_display_value,
+    entity_counts,
+    filter_issues,
+)
+from modules.series_fill import apply_fill_candidates, find_safe_fill_candidates
 
 
 st.set_page_config(page_title="Data Rank Hub Excel Checker Pro", page_icon="📊", layout="wide")
 
-st.title("Data Rank Hub Excel Checker Pro")
-st.caption("UPLOAD → CHECK → REVIEW → FIX → RECHECK → DOWNLOAD")
-st.info(
-    "Stage 4: clear problem display + historical lifecycle protection + smarter period-by-period Top-N risk. "
-    "Safe Auto Series Fill is the next stage."
+st.markdown(
+    """
+    <style>
+    .block-container {padding-top: 1.2rem; padding-bottom: 3rem;}
+    div[data-testid="stMetric"] {background: rgba(120,120,120,.06); border-radius: 14px; padding: 12px;}
+    .small-muted {color:#777; font-size:0.9rem;}
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
+
+
+def _state_key(file_hash: str, sheet: str | None) -> str:
+    return f"{file_hash}|{sheet or ''}"
+
+
+def _reset_workspace(normalized_df: pd.DataFrame, workspace_key: str) -> None:
+    st.session_state["workspace_key"] = workspace_key
+    st.session_state["working_df"] = normalized_df.copy()
+    st.session_state["resolutions"] = {}
+    st.session_state["force_overrides"] = []
+    st.session_state["audit_log"] = []
+    st.session_state["fix_mode"] = ""
+    st.session_state["country_complete"] = set()
+
+
+def _append_audit(entry: dict) -> None:
+    st.session_state.setdefault("audit_log", []).append(entry)
+
+
+def _resolve(issue_id: str, action: str, reason: str, entity: str = "", period: str = "") -> None:
+    st.session_state["resolutions"] = add_resolution(
+        st.session_state.get("resolutions", {}), issue_id, action, reason
+    )
+    _append_audit(make_audit_entry(action, entity, period, reason=reason, method="Review action"))
+
+
+def _rerun() -> None:
+    st.session_state["fix_mode"] = ""
+    st.rerun()
+
+
+# -----------------------------------------------------------------------------
+# Header + upload
+# -----------------------------------------------------------------------------
+st.title("Data Rank Hub Excel Checker Pro")
+st.caption("UPLOAD → CHECK → REVIEW BY COUNTRY → FIX → RECHECK → DOWNLOAD")
 
 uploaded_file = st.file_uploader(
     "Upload Excel or CSV",
     type=["xlsx", "xls", "csv"],
-    help="Supports Data Rank Hub checker format and AlienArt format.",
+    help="Supports Checker format and AlienArt format. The original layout is remembered for corrected export.",
 )
 if uploaded_file is None:
+    st.info("Upload a dataset to start. The checker will organize problems country-by-country.")
     st.stop()
 
 file_bytes = uploaded_file.getvalue()
@@ -36,10 +95,11 @@ file_hash = hashlib.sha256(file_bytes).hexdigest()
 try:
     sheet_names = get_sheet_names(file_bytes, uploaded_file.name)
 except Exception as exc:
-    st.error(f"Could not inspect the file: {exc}")
+    st.error(f"Could not inspect this file: {exc}")
     st.stop()
 
 selected_sheet = st.selectbox("Sheet", sheet_names, index=0) if sheet_names else None
+
 try:
     loaded = read_table(file_bytes, uploaded_file.name, selected_sheet)
 except Exception as exc:
@@ -48,270 +108,405 @@ except Exception as exc:
 
 original_df = loaded.dataframe
 orientation = detect_orientation(original_df)
-orientation_label = {
-    "checker": "Checker format",
-    "alienart": "AlienArt format",
-    "unknown": "Unknown",
-}.get(orientation.orientation, orientation.orientation)
-
-st.subheader("1. File detected")
-a, b, c, d = st.columns(4)
-a.metric("Rows", f"{len(original_df):,}")
-b.metric("Columns", f"{len(original_df.columns):,}")
-c.metric("Layout", orientation_label)
-d.metric("Detection confidence", f"{orientation.confidence:.0%}")
-
 if orientation.orientation == "unknown":
-    st.warning(orientation.reason)
+    st.error("I could not confidently recognize the dataset layout.")
+    st.caption(orientation.reason)
     st.stop()
 
 try:
     normalized_df = normalize_to_checker(original_df, orientation)
 except Exception as exc:
-    st.error(f"Could not normalize this table: {exc}")
+    st.error(f"Could not normalize this dataset: {exc}")
     st.stop()
 
-st.caption(f"Detected {orientation.frequency or 'unknown'} periods. Original layout is remembered for corrected-file export.")
-with st.expander("Preview uploaded data"):
-    st.dataframe(original_df.head(30), use_container_width=True, hide_index=True)
-with st.expander("Technical: internal checker view"):
-    st.dataframe(normalized_df.head(30), use_container_width=True, hide_index=True)
+workspace_key = _state_key(file_hash, selected_sheet)
+if st.session_state.get("workspace_key") != workspace_key:
+    _reset_workspace(normalized_df, workspace_key)
 
-st.subheader("2. Check dataset")
-left, right = st.columns([2, 1])
-with left:
-    top_n = st.selectbox(
-        "Important ranking",
-        options=[10, 15, 20, 25, 30],
-        index=1,
-        format_func=lambda n: f"Top {n}",
-        help="Ranking is calculated separately for every period.",
-    )
-with right:
-    data_mode = st.selectbox(
-        "Data type",
-        ["Regular Data", "Cumulative Totals"],
-        help="Choose Cumulative Totals only when the series should never decrease.",
-    )
+working_df = st.session_state["working_df"]
 
-with st.expander("Advanced settings", expanded=False):
-    c1, c2, c3 = st.columns(3)
-    with c1:
+# -----------------------------------------------------------------------------
+# Sidebar settings / navigation
+# -----------------------------------------------------------------------------
+with st.sidebar:
+    st.header("Checker Menu")
+    top_n = st.selectbox("Important ranking", [10, 15, 20, 25, 30], index=1, format_func=lambda n: f"Top {n}")
+    data_mode = st.selectbox("Data type", ["Regular Data", "Cumulative Totals"])
+
+    with st.expander("Advanced settings", expanded=False):
         repeated_threshold = st.number_input("Repeated value threshold", 2, 20, 2, 1)
-    with c2:
         suspicious_jump_threshold = st.number_input("Suspicious jump %", 100, 10000, 500, 50)
-    with c3:
         check_negative_values = st.checkbox("Check negative values", value=True)
 
-check_clicked = st.button("CHECK DATASET", type="primary", use_container_width=True)
-settings_signature = (
-    file_hash, selected_sheet, int(top_n), data_mode, int(repeated_threshold),
-    float(suspicious_jump_threshold), bool(check_negative_values),
+# -----------------------------------------------------------------------------
+# Run checker on the current working copy
+# -----------------------------------------------------------------------------
+config = CheckerConfig(
+    data_mode=data_mode,
+    repeated_threshold=int(repeated_threshold),
+    suspicious_jump_threshold=float(suspicious_jump_threshold),
+    check_negative_values=bool(check_negative_values),
+)
+result = run_core_checks(working_df, config)
+lifecycle_rules = load_lifecycle_rules()
+
+risk_table, ranking, lifecycle_skips = build_top_n_risk_table(
+    working_df,
+    result.period_columns,
+    result.numeric_matrix,
+    int(top_n),
+    lifecycle_rules=lifecycle_rules,
+    user_overrides=st.session_state.get("force_overrides", []),
+)
+lifecycle_summary = build_lifecycle_summary(
+    working_df, result.period_columns, result.numeric_matrix, lifecycle_rules
 )
 
-if check_clicked:
-    config = CheckerConfig(
-        data_mode=data_mode,
-        repeated_threshold=int(repeated_threshold),
-        suspicious_jump_threshold=float(suspicious_jump_threshold),
-        check_negative_values=bool(check_negative_values),
-    )
-    result = run_core_checks(normalized_df, config)
-    lifecycle_rules = load_lifecycle_rules()
-    if result.period_columns:
-        risk_table, ranking, lifecycle_skips = build_top_n_risk_table(
-            normalized_df,
-            result.period_columns,
-            result.numeric_matrix,
-            int(top_n),
-            lifecycle_rules=lifecycle_rules,
-        )
-        lifecycle_summary = build_lifecycle_summary(
-            normalized_df, result.period_columns, result.numeric_matrix, lifecycle_rules
-        )
-    else:
-        risk_table, ranking = pd.DataFrame(), None
-        lifecycle_skips = pd.DataFrame()
-        lifecycle_summary = pd.DataFrame()
+raw_action_table = build_action_table(result.findings_frame(), risk_table)
+raw_action_table = add_ranking_context(raw_action_table, working_df, ranking)
+unresolved, resolved = apply_resolutions(raw_action_table, st.session_state.get("resolutions", {}))
 
-    st.session_state["stage4_result"] = result
-    st.session_state["stage4_risk_table"] = risk_table
-    st.session_state["stage4_lifecycle_skips"] = lifecycle_skips
-    st.session_state["stage4_lifecycle_summary"] = lifecycle_summary
-    st.session_state["stage4_signature"] = settings_signature
+safe_fill_candidates = find_safe_fill_candidates(
+    working_df,
+    result.period_columns,
+    lifecycle_rules=lifecycle_rules,
+    user_overrides=st.session_state.get("force_overrides", []),
+)
 
-if st.session_state.get("stage4_signature") != settings_signature:
-    st.caption("Choose the settings above and press CHECK DATASET.")
-    st.stop()
+must_fix = int((unresolved["Severity"] == "MUST FIX").sum()) if not unresolved.empty else 0
+must_check = int((unresolved["Severity"] == "MUST CHECK").sum()) if not unresolved.empty else 0
+review_count = int((unresolved["Severity"] == "REVIEW").sum()) if not unresolved.empty else 0
+top_risk_count = int((unresolved["Source"] == "Top-N risk").sum()) if not unresolved.empty else 0
+missing_period_count = int((unresolved["Problem"] == "Missing Period").sum()) if not unresolved.empty else 0
 
-result = st.session_state.get("stage4_result")
-risk_table = st.session_state.get("stage4_risk_table", pd.DataFrame())
-lifecycle_skips = st.session_state.get("stage4_lifecycle_skips", pd.DataFrame())
-lifecycle_summary = st.session_state.get("stage4_lifecycle_summary", pd.DataFrame())
-if result is None:
-    st.stop()
-
-findings_df = result.findings_frame()
-core_counts = severity_counts(findings_df)
-core_status = final_status(findings_df)
-top_n_status = classify_top_n_safety(findings_df, risk_table)
-action_table = build_action_table(findings_df, risk_table)
-
-# Top-N risk rows are actual MUST CHECK items in Stage 4.
-combined_must_check = int(core_counts.get("MUST CHECK", 0)) + int(len(risk_table))
-internal_gaps = int((findings_df["Category"] == "Internal Gap").sum()) if not findings_df.empty else 0
-historical_expected = 0
-protected_transition = 0
-if not lifecycle_summary.empty:
-    historical_expected = int(lifecycle_summary["Expected Historical Blanks"].sum())
-    protected_transition = int(lifecycle_summary["Protected Transition Blanks"].sum())
-
-st.subheader("3. Results")
-m1, m2, m3, m4, m5, m6 = st.columns(6)
-m1.metric("Must Fix", core_counts.get("MUST FIX", 0))
-m2.metric("Must Check", combined_must_check)
-m3.metric("Review", core_counts.get("REVIEW", 0))
-m4.metric("Internal Gaps", internal_gaps)
-m5.metric(f"Top {top_n} Risk", len(risk_table))
-m6.metric("Historical Expected", historical_expected)
-
-status_left, status_right = st.columns(2)
-with status_left:
-    st.markdown(f"**Core Data Status:** `{core_status}`")
-with status_right:
-    st.markdown(f"**Top-N Ranking Safety:** `{top_n_status}`")
-
-if core_counts.get("MUST FIX", 0):
-    st.error(f"Fix {core_counts['MUST FIX']} definite problem(s) before using this dataset.")
-elif combined_must_check:
-    st.warning(f"{combined_must_check} item(s) need verification before Top {top_n} can be certified.")
-elif core_counts.get("REVIEW", 0):
-    st.success(f"No critical blockers found. {core_counts['REVIEW']} review item(s) are optional verification points.")
+core_status = "READY" if must_fix == 0 and must_check == 0 else "REVIEW NEEDED"
+if must_fix:
+    top_n_safety = "NO"
+elif top_risk_count or missing_period_count:
+    top_n_safety = "UNRESOLVED"
 else:
-    st.success("No active core or Top-N blockers were found.")
+    top_n_safety = "YES"
 
-if historical_expected or protected_transition:
-    st.info(
-        f"Historical lifecycle protection recognized {historical_expected} expected blank(s) and "
-        f"{protected_transition} protected transition blank(s). These are not treated as ordinary missing-data errors."
+historical_expected = int(lifecycle_summary["Expected Historical Blanks"].sum()) if not lifecycle_summary.empty else 0
+protected_transition = int(lifecycle_summary["Protected Transition Blanks"].sum()) if not lifecycle_summary.empty else 0
+user_forced = int((lifecycle_skips["Lifecycle Status"] == "USER_FORCE_CORRECT").sum()) if not lifecycle_skips.empty else 0
+
+with st.sidebar:
+    labels = {
+        "All Errors": len(unresolved),
+        "Must Fix": must_fix,
+        "Must Check": must_check,
+        "Review": review_count,
+        "Top-N Risk": top_risk_count,
+        "Historical / Expected": historical_expected + protected_transition + user_forced,
+        "Fixed / Ignored": len(resolved),
+        "Download": None,
+        "Advanced Details": None,
+    }
+    menu = st.radio(
+        "View",
+        list(labels),
+        format_func=lambda x: f"{x} ({labels[x]})" if labels[x] is not None else x,
     )
 
-if core_counts.get("MUST FIX", 0):
-    st.write("**Recommended next action:** Open **Problems to review** and fix the MUST FIX rows first.")
-elif combined_must_check:
-    st.write("**Recommended next action:** Review the MUST CHECK rows below and verify them against the source.")
-elif core_counts.get("REVIEW", 0):
-    st.write("**Recommended next action:** Dataset can proceed from the active critical checks; review suspicious items if needed.")
-else:
-    st.write("**Recommended next action:** No action required from the active Stage-4 checks.")
+    st.divider()
+    if st.button("APPLY HISTORICAL RULES", use_container_width=True):
+        st.toast(
+            f"Historical rules active: {historical_expected} expected blanks + {protected_transition} protected transition blanks.",
+            icon="✅",
+        )
 
-st.subheader("4. Problems to review")
-st.caption("This is the main work list. Important problems are shown as visible cards first, followed by the full filterable table.")
-if action_table.empty:
-    st.success("No problems found by the active checks.")
-else:
-    # Always surface actionable rows as visible cards so the user never has to hunt inside a dataframe.
-    priority_rows = action_table[action_table["Severity"].isin(["MUST FIX", "MUST CHECK"])].copy()
-    if not priority_rows.empty:
-        st.markdown("### Needs your attention")
-        for _, issue in priority_rows.iterrows():
-            severity = str(issue.get("Severity", ""))
-            entity = str(issue.get("Entity", "")) or "Unknown entity"
-            period = str(issue.get("Period", "")) or "Unknown period"
-            problem = str(issue.get("Problem", "")) or "Problem"
-            header = f"{entity} — {period} — {problem}"
-            if severity == "MUST FIX":
-                st.error(f"MUST FIX: {header}")
-            else:
-                st.warning(f"MUST CHECK: {header}")
-
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                st.markdown(f"**Previous value:** {issue.get('Previous Value', '') or '—'}")
-                st.markdown(f"**Previous rank:** {issue.get('Previous Rank', '') or '—'}")
-            with c2:
-                st.markdown(f"**Next value:** {issue.get('Next Value', '') or '—'}")
-                st.markdown(f"**Next rank:** {issue.get('Next Rank', '') or '—'}")
-            with c3:
-                st.markdown(f"**Top-N cutoff:** {issue.get('Top-N Cutoff', '') or '—'}")
-                st.markdown(f"**Current value:** {issue.get('Current Value', '') or 'Missing'}")
-
-            why = str(issue.get("Why Flagged", "") or "")
-            todo = str(issue.get("What To Do", "") or "")
-            if why:
-                st.markdown(f"**Why flagged:** {why}")
-            if todo:
-                st.markdown(f"**What to do:** {todo}")
-            st.divider()
-
-    st.markdown("### Full problem list")
-    f1, f2 = st.columns([1, 2])
-    with f1:
-        severity_filter = st.selectbox("Severity", ["Needs attention", "MUST FIX", "MUST CHECK", "REVIEW", "All"])
-    with f2:
-        entities = ["All entities"] + sorted([e for e in action_table["Entity"].dropna().astype(str).unique().tolist() if e])
-        entity_filter = st.selectbox("Entity", entities)
-
-    shown = action_table.copy()
-    if severity_filter == "Needs attention":
-        shown = shown[shown["Severity"].isin(["MUST FIX", "MUST CHECK"])]
-    elif severity_filter != "All":
-        shown = shown[shown["Severity"] == severity_filter]
-    if entity_filter != "All entities":
-        shown = shown[shown["Entity"] == entity_filter]
-
-    if shown.empty:
-        st.success("Nothing in this filter.")
+    if safe_fill_candidates.empty:
+        st.button("AUTO FILL ALL SAFE GAPS", disabled=True, use_container_width=True)
+        st.caption("No safe internal gaps are ready for automatic fill.")
     else:
-        visible_columns = [
-            "Severity", "Entity", "Period", "Problem", "Current Value", "Previous Value", "Previous Rank",
-            "Next Value", "Next Rank", "Top-N Cutoff", "Why Flagged", "What To Do",
-        ]
-        st.dataframe(shown[visible_columns], use_container_width=True, hide_index=True)
+        st.caption(f"{len(safe_fill_candidates)} safe internal cell(s) ready for linear Series Fill.")
+        if st.button("AUTO FILL ALL SAFE GAPS", type="primary", use_container_width=True):
+            filled_df, logs = apply_fill_candidates(working_df, safe_fill_candidates)
+            st.session_state["working_df"] = filled_df
+            st.session_state.setdefault("audit_log", []).extend(logs)
+            _rerun()
 
-st.subheader(f"5. Top {top_n} ranking details")
-if risk_table.empty:
-    st.success(f"No unresolved missing cells were identified as realistic Top {top_n} risks after lifecycle filtering.")
+    if st.button("RECHECK", use_container_width=True):
+        st.toast("Dataset rechecked using the current working copy.", icon="🔄")
+
+# -----------------------------------------------------------------------------
+# Compact status bar
+# -----------------------------------------------------------------------------
+layout_label = "AlienArt format" if orientation.orientation == "alienart" else "Checker format"
+with st.container(border=True):
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Must Fix", must_fix)
+    c2.metric("Must Check", must_check)
+    c3.metric("Review", review_count)
+    c4.metric("Status", core_status)
+    st.caption(
+        f"{layout_label} • {orientation.frequency or 'Unknown frequency'} • Top {top_n} safety: {top_n_safety} • "
+        f"Historical expected: {historical_expected:,} • Safe fill ready: {len(safe_fill_candidates):,}"
+    )
+
+if must_fix:
+    st.error(f"Start with the {must_fix} MUST FIX item(s).")
+elif must_check:
+    st.warning(f"{must_check} item(s) need verification before this dataset is fully ready.")
+elif review_count:
+    st.success("No critical blockers. Review items are optional verification points.")
 else:
-    st.caption("Each row is period-specific. Historical expected blanks are removed before this table is built.")
-    st.dataframe(risk_table, use_container_width=True, hide_index=True)
+    st.success("No unresolved problems found by the active checks.")
 
-with st.expander("Historical lifecycle details"):
-    if lifecycle_summary.empty:
-        st.caption("No configured historical lifecycle rule matched entities in this dataset.")
+# -----------------------------------------------------------------------------
+# Main menu pages
+# -----------------------------------------------------------------------------
+if menu in {"All Errors", "Must Fix", "Must Check", "Review", "Top-N Risk"}:
+    filtered = filter_issues(unresolved, menu)
+    st.subheader(menu)
+    if filtered.empty:
+        st.success("Nothing to review in this section.")
     else:
+        st.caption("Open a country to see every problem for that country and fix them one by one.")
+        counts = entity_counts(filtered)
+
+        for _, entity_row in counts.iterrows():
+            entity = str(entity_row["Entity"])
+            entity_issues = filtered[
+                filtered["Entity"].replace("", "Dataset / Structure").fillna("Dataset / Structure").eq(entity)
+            ].copy()
+            label = f"{entity} ({len(entity_issues)})"
+            if entity in st.session_state.get("country_complete", set()):
+                label += " ✓"
+
+            with st.expander(label, expanded=len(counts) <= 3):
+                for _, issue in entity_issues.iterrows():
+                    issue_id = str(issue["Issue ID"])
+                    severity = str(issue.get("Severity", ""))
+                    period = str(issue.get("Period", ""))
+                    problem = str(issue.get("Problem", ""))
+                    current = clean_display_value(issue.get("Current Value"))
+                    prev = clean_display_value(issue.get("Previous Value"))
+                    nxt = clean_display_value(issue.get("Next Value"))
+                    prev_rank = clean_display_value(issue.get("Previous Rank"))
+                    current_rank = clean_display_value(issue.get("Current Rank"))
+                    next_rank = clean_display_value(issue.get("Next Rank"))
+                    cutoff = clean_display_value(issue.get("Top-N Cutoff"))
+
+                    with st.container(border=True):
+                        if severity == "MUST FIX":
+                            st.markdown(f"### 🔴 {period} — {problem}")
+                        elif severity == "MUST CHECK":
+                            st.markdown(f"### 🟠 {period} — {problem}")
+                        else:
+                            st.markdown(f"### 🟡 {period} — {problem}")
+
+                        x1, x2, x3, x4 = st.columns(4)
+                        x1.markdown(f"**Current**  \n{current}")
+                        x2.markdown(f"**Previous**  \n{prev}  \nRank: {prev_rank}")
+                        x3.markdown(f"**Next**  \n{nxt}  \nRank: {next_rank}")
+                        x4.markdown(f"**Top {top_n}**  \nCutoff: {cutoff}  \nCurrent rank: {current_rank}")
+
+                        why = str(issue.get("Why Flagged", "")).strip()
+                        action = str(issue.get("What To Do", "")).strip()
+                        if why:
+                            st.caption(f"Why: {why}")
+                        if action:
+                            st.caption(f"Next: {action}")
+
+                        exact_period = period in working_df.columns
+                        candidate_rows = safe_fill_candidates[
+                            safe_fill_candidates["Entity"].eq(str(issue.get("Entity", "")))
+                        ] if not safe_fill_candidates.empty else pd.DataFrame()
+                        exact_candidate = candidate_rows[candidate_rows["Period"].eq(period)] if not candidate_rows.empty else pd.DataFrame()
+
+                        b1, b2, b3, b4 = st.columns(4)
+                        if b1.button("Enter Correct Value", key=f"manual_{issue_id}", disabled=not exact_period, use_container_width=True):
+                            st.session_state["fix_mode"] = f"manual:{issue_id}"
+                        series_disabled = exact_candidate.empty and not (problem == "Internal Gap" and not candidate_rows.empty)
+                        if b2.button("Series Fill", key=f"fill_{issue_id}", disabled=series_disabled, use_container_width=True):
+                            if not exact_candidate.empty:
+                                selected = exact_candidate
+                            else:
+                                selected = candidate_rows
+                            filled_df, logs = apply_fill_candidates(working_df, selected)
+                            st.session_state["working_df"] = filled_df
+                            st.session_state.setdefault("audit_log", []).extend(logs)
+                            _rerun()
+                        if b3.button("Keep / Ignore", key=f"ignore_{issue_id}", use_container_width=True):
+                            _resolve(issue_id, "Keep Original / Ignore", "User reviewed and accepted the original data", str(issue.get("Entity", "")), period)
+                            _rerun()
+                        if b4.button("Force Correct", key=f"force_{issue_id}", disabled=not exact_period, use_container_width=True):
+                            st.session_state["fix_mode"] = f"force:{issue_id}"
+
+                        if st.session_state.get("fix_mode") == f"manual:{issue_id}":
+                            st.markdown("**Enter corrected numeric value**")
+                            value_text = st.text_input("Correct value", key=f"value_{issue_id}", placeholder="Example: 275300")
+                            s1, s2 = st.columns([1, 1])
+                            if s1.button("Save Value", key=f"save_{issue_id}", type="primary", use_container_width=True):
+                                try:
+                                    numeric_value = float(value_text.replace(",", "").strip())
+                                    updated, log = apply_manual_value(
+                                        working_df, str(issue.get("Entity", "")), period, numeric_value
+                                    )
+                                    st.session_state["working_df"] = updated
+                                    _append_audit(log)
+                                    _rerun()
+                                except Exception as exc:
+                                    st.error(str(exc))
+                            if s2.button("Cancel", key=f"cancel_manual_{issue_id}", use_container_width=True):
+                                st.session_state["fix_mode"] = ""
+                                st.rerun()
+
+                        if st.session_state.get("fix_mode") == f"force:{issue_id}":
+                            st.markdown("**Force Correct — explain why this blank/value is valid**")
+                            reason = st.selectbox("Reason", FORCE_REASONS, key=f"reason_{issue_id}")
+                            default_scope_index = 0
+                            if reason in {"Production not started yet", "Entity did not exist yet", "Covered by predecessor country", "Series intentionally starts here"}:
+                                default_scope_index = 1
+                            elif reason == "Series intentionally ends here":
+                                default_scope_index = 2
+                            scope_options = ["This period only", "This and all earlier periods", "This and all later periods"]
+                            scope = st.selectbox("Apply to", scope_options, index=default_scope_index, key=f"scope_{issue_id}")
+                            note = st.text_input("Optional note / predecessor name", key=f"note_{issue_id}")
+                            f1, f2 = st.columns(2)
+                            if f1.button("Apply Force Correct", key=f"apply_force_{issue_id}", type="primary", use_container_width=True):
+                                override = build_force_override(
+                                    str(issue.get("Entity", "")), period, reason, scope, note
+                                )
+                                st.session_state.setdefault("force_overrides", []).append(override)
+                                _resolve(
+                                    issue_id,
+                                    "Force Correct",
+                                    f"{override['reason']} — {scope}",
+                                    str(issue.get("Entity", "")),
+                                    period,
+                                )
+                                _rerun()
+                            if f2.button("Cancel", key=f"cancel_force_{issue_id}", use_container_width=True):
+                                st.session_state["fix_mode"] = ""
+                                st.rerun()
+
+                # Country completion is a review convenience, not a data edit.
+                entity_unresolved = unresolved[
+                    unresolved["Entity"].replace("", "Dataset / Structure").fillna("Dataset / Structure").eq(entity)
+                ]
+                critical_left = int(entity_unresolved["Severity"].isin(["MUST FIX", "MUST CHECK"]).sum())
+                if critical_left == 0 and len(entity_unresolved):
+                    if st.button(f"Mark {entity} Reviewed ✓", key=f"complete_{entity}"):
+                        completed = set(st.session_state.get("country_complete", set()))
+                        completed.add(entity)
+                        st.session_state["country_complete"] = completed
+                        st.toast(f"{entity} marked reviewed.", icon="✅")
+
+elif menu == "Historical / Expected":
+    st.subheader("Historical / Expected")
+    st.caption("These are protected historical blanks. They are not automatically turned into zero and no predecessor values are copied into successor countries.")
+    if lifecycle_skips.empty:
+        st.info("No historical/forced blank classifications are active for this dataset.")
+    else:
+        display_cols = [c for c in ["Entity", "Period", "Lifecycle Status", "Rule", "Why"] if c in lifecycle_skips.columns]
+        st.dataframe(lifecycle_skips[display_cols], use_container_width=True, hide_index=True)
+    if st.session_state.get("force_overrides"):
+        st.markdown("#### Your Force Correct rules")
+        st.dataframe(pd.DataFrame(st.session_state["force_overrides"]), use_container_width=True, hide_index=True)
+
+elif menu == "Fixed / Ignored":
+    st.subheader("Fixed / Ignored")
+    if resolved.empty and not st.session_state.get("audit_log"):
+        st.info("Nothing has been resolved or changed yet.")
+    else:
+        if not resolved.empty:
+            st.markdown("#### Resolved review items")
+            st.dataframe(resolved, use_container_width=True, hide_index=True)
+        if st.session_state.get("audit_log"):
+            st.markdown("#### Change log")
+            st.dataframe(pd.DataFrame(st.session_state["audit_log"]), use_container_width=True, hide_index=True)
+
+elif menu == "Download":
+    st.subheader("Download")
+    st.caption("The corrected workbook is restored to the original Checker/AlienArt orientation. For .xlsx files, other workbook sheets are preserved.")
+
+    summary = {
+        "File": uploaded_file.name,
+        "Sheet": selected_sheet or "",
+        "Layout": layout_label,
+        "Frequency": orientation.frequency or "",
+        "Top N": int(top_n),
+        "Must Fix": must_fix,
+        "Must Check": must_check,
+        "Review": review_count,
+        "Top-N Safety": top_n_safety,
+        "Historical Expected": historical_expected,
+        "Protected Transition": protected_transition,
+        "User Force Correct": user_forced,
+        "Safe Fill Remaining": int(len(safe_fill_candidates)),
+    }
+
+    corrected_bytes = build_corrected_workbook_bytes(
+        file_bytes,
+        uploaded_file.name,
+        selected_sheet,
+        original_df,
+        working_df,
+        orientation,
+    )
+    audit_bytes = build_audit_report_bytes(
+        unresolved,
+        resolved,
+        st.session_state.get("audit_log", []),
+        lifecycle_summary,
+        safe_fill_candidates,
+        summary,
+    )
+
+    base_name = Path(uploaded_file.name).stem
+    d1, d2 = st.columns(2)
+    d1.download_button(
+        "DOWNLOAD CORRECTED EXCEL",
+        corrected_bytes,
+        file_name=f"{base_name}_Corrected.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        type="primary",
+    )
+    d2.download_button(
+        "DOWNLOAD AUDIT REPORT",
+        audit_bytes,
+        file_name=f"{base_name}_Audit_Report.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+
+    if must_fix or must_check:
+        st.warning("The corrected workbook can still be downloaded, but unresolved Must Fix/Must Check items remain.")
+    else:
+        st.success("No unresolved Must Fix or Must Check items remain.")
+
+elif menu == "Advanced Details":
+    st.subheader("Advanced Details")
+    with st.expander("Original file preview"):
+        st.dataframe(original_df.head(100), use_container_width=True, hide_index=True)
+    with st.expander("Internal checker view"):
+        st.dataframe(working_df.head(100), use_container_width=True, hide_index=True)
+    with st.expander("Full unresolved findings"):
+        st.dataframe(unresolved, use_container_width=True, hide_index=True)
+    with st.expander("Safe Series Fill preview"):
+        if safe_fill_candidates.empty:
+            st.info("No safe internal gaps found.")
+        else:
+            st.dataframe(safe_fill_candidates, use_container_width=True, hide_index=True)
+    with st.expander("Lifecycle summary"):
         st.dataframe(lifecycle_summary, use_container_width=True, hide_index=True)
-    if not lifecycle_skips.empty:
-        st.caption("Protected/expected blank periods excluded from Top-N risk:")
-        st.dataframe(lifecycle_skips, use_container_width=True, hide_index=True)
-
-st.subheader("6. Other core findings")
-if findings_df.empty:
-    st.success("No core findings.")
-else:
-    with st.expander("Counts by problem type"):
-        st.dataframe(category_summary(findings_df), use_container_width=True, hide_index=True)
-    with st.expander("Full core findings table"):
-        st.dataframe(findings_df, use_container_width=True, hide_index=True)
-
-st.subheader("7. Coverage")
-st.caption(
-    "Leading/trailing blanks remain coverage information unless a configured lifecycle rule classifies them or local ranking evidence makes an adjacent boundary period relevant."
-)
-st.dataframe(result.completeness, use_container_width=True, hide_index=True)
-
-with st.expander("Technical details"):
-    st.write({
-        "filename": loaded.filename,
-        "sheet": loaded.sheet_name,
-        "file_fingerprint": file_hash[:12],
-        "original_orientation": orientation.orientation,
+    st.json({
+        "filename": uploaded_file.name,
+        "sheet": selected_sheet,
+        "layout": orientation.orientation,
+        "detection_confidence": round(float(orientation.confidence), 4),
         "frequency": orientation.frequency,
-        "recognized_period_columns": len(result.period_columns),
-        "entities": len(normalized_df),
-        "top_n_engine": f"Active — period-by-period Top {top_n}, lifecycle-aware",
-        "historical_lifecycle": "Active — configurable rules",
-        "historical_expected_blanks": historical_expected,
-        "protected_transition_blanks": protected_transition,
-        "auto_series_fill": "Not active yet — Stage 5",
+        "recognized_periods": len(result.period_columns),
+        "entities": len(working_df),
+        "top_n": int(top_n),
+        "top_n_safety": top_n_safety,
+        "historical_expected": historical_expected,
+        "protected_transition": protected_transition,
+        "user_force_correct": user_forced,
+        "safe_fill_candidates": len(safe_fill_candidates),
     })
+
