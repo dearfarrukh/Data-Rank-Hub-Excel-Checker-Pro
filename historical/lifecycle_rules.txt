@@ -1,0 +1,4 @@
+# DATA RANK HUB — LIFECYCLE RULES
+# Stage 1 placeholder.
+# Never treat a lifecycle blank as zero automatically.
+# Never interpolate across a protected historical transition automatically.
