@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
 
 import pandas as pd
+
+from modules.lifecycle import classify_lifecycle, load_lifecycle_rules, rule_lookup
 
 
 @dataclass
@@ -52,13 +53,9 @@ def evaluate_missing_cell_risk(
     numeric_matrix: pd.DataFrame,
     ranking: RankingResult,
     rank_margin: int = 2,
+    boundary_max_distance: int = 1,
 ) -> dict:
-    """
-    Evaluate whether one missing cell could realistically affect selected Top-N.
-
-    No value is written into the dataset. Interpolation is used only as a risk signal
-    when both surrounding anchors exist.
-    """
+    """Evaluate one missing cell using local period evidence only."""
     row = numeric_matrix.loc[row_index]
     values = [None if pd.isna(v) else float(v) for v in row.tolist()]
     left_i = _nearest_numeric_position(values, period_index, -1)
@@ -66,11 +63,11 @@ def evaluate_missing_cell_risk(
 
     period = str(period_columns[period_index])
     cutoff = ranking.cutoffs.get(period)
-
     prev_value = values[left_i] if left_i is not None else None
     next_value = values[right_i] if right_i is not None else None
     prev_rank = None
     next_rank = None
+
     if left_i is not None:
         raw = ranking.ranks.loc[row_index, period_columns[left_i]]
         prev_rank = None if pd.isna(raw) else int(raw)
@@ -82,20 +79,26 @@ def evaluate_missing_cell_risk(
     estimated_value = None
     estimated_rank_risk = False
 
-    # Local rank evidence only — never "ever Top-N in history".
-    if prev_rank is not None and prev_rank <= ranking.top_n + rank_margin:
-        reasons.append(f"previous available rank was {prev_rank}")
-    if next_rank is not None and next_rank <= ranking.top_n + rank_margin:
-        reasons.append(f"next available rank was {next_rank}")
+    # Internal gaps: both anchors can provide local evidence.
+    if left_i is not None and right_i is not None:
+        if prev_rank is not None and prev_rank <= ranking.top_n + rank_margin:
+            reasons.append(f"previous available rank was {prev_rank}")
+        if next_rank is not None and next_rank <= ranking.top_n + rank_margin:
+            reasons.append(f"next available rank was {next_rank}")
+        if cutoff is not None:
+            estimated_value = _linear_estimate(prev_value, next_value, left_i, right_i, period_index)
+            if estimated_value >= cutoff:
+                estimated_rank_risk = True
+                reasons.append("between-anchor estimate reaches the selected Top-N cutoff")
+    else:
+        # Leading/trailing coverage: only trust an immediately adjacent boundary anchor.
+        anchor_i = left_i if left_i is not None else right_i
+        anchor_rank = prev_rank if left_i is not None else next_rank
+        if anchor_i is not None and abs(anchor_i - period_index) <= boundary_max_distance:
+            if anchor_rank is not None and anchor_rank <= ranking.top_n + rank_margin:
+                side = "previous" if left_i is not None else "next"
+                reasons.append(f"adjacent {side} available rank was {anchor_rank}")
 
-    # For internal gaps, a straight-line value is a risk estimate only.
-    if left_i is not None and right_i is not None and cutoff is not None:
-        estimated_value = _linear_estimate(prev_value, next_value, left_i, right_i, period_index)
-        if estimated_value >= cutoff:
-            estimated_rank_risk = True
-            reasons.append("between-anchor estimate reaches the selected Top-N cutoff")
-
-    risk = bool(reasons)
     return {
         "period": period,
         "cutoff": cutoff,
@@ -106,7 +109,7 @@ def evaluate_missing_cell_risk(
         "next_value": next_value,
         "next_rank": next_rank,
         "estimated_value": estimated_value,
-        "risk": risk,
+        "risk": bool(reasons),
         "reason": "; ".join(reasons),
         "estimated_rank_risk": estimated_rank_risk,
     }
@@ -118,16 +121,31 @@ def build_top_n_risk_table(
     numeric_matrix: pd.DataFrame,
     top_n: int,
     rank_margin: int = 2,
-) -> tuple[pd.DataFrame, RankingResult]:
+    lifecycle_rules=None,
+) -> tuple[pd.DataFrame, RankingResult, pd.DataFrame]:
     ranking = build_ranking_matrix(numeric_matrix, top_n)
+    rules = lifecycle_rules if lifecycle_rules is not None else load_lifecycle_rules()
+    lookup = rule_lookup(rules)
     rows: list[dict] = []
+    skipped_rows: list[dict] = []
 
     for row_index in df.index:
         entity = str(df.loc[row_index, "Entity"]).strip()
         for i, period in enumerate(period_columns):
-            raw_numeric = numeric_matrix.loc[row_index, period]
-            if not pd.isna(raw_numeric):
+            if not pd.isna(numeric_matrix.loc[row_index, period]):
                 continue
+
+            lifecycle_status, lifecycle_rule = classify_lifecycle(entity, period, lookup)
+            if lifecycle_status in {"EXPECTED_BEFORE_START", "EXPECTED_AFTER_END", "PROTECTED_TRANSITION"}:
+                skipped_rows.append({
+                    "Entity": entity,
+                    "Period": str(period),
+                    "Lifecycle Status": lifecycle_status,
+                    "Rule": lifecycle_rule.canonical if lifecycle_rule else "",
+                    "Why": lifecycle_rule.notes if lifecycle_rule else "",
+                })
+                continue
+
             risk = evaluate_missing_cell_risk(
                 row_index=row_index,
                 period_index=i,
@@ -141,6 +159,7 @@ def build_top_n_risk_table(
             rows.append({
                 "Entity": entity,
                 "Error Period": str(period),
+                "Severity": "MUST CHECK",
                 "Problem Type": "Missing value may affect Top-N",
                 "Previous Period": risk["previous_period"],
                 "Previous Value": risk["previous_value"],
@@ -153,27 +172,29 @@ def build_top_n_risk_table(
                 "Top-N Cutoff": risk["cutoff"],
                 "Risk Estimate": risk["estimated_value"],
                 "Why Flagged": risk["reason"],
+                "What To Do": "Verify the source. Do not fill blindly; safe fill is added only after lifecycle protection.",
             })
 
-    columns = [
-        "Entity", "Error Period", "Problem Type", "Previous Period", "Previous Value",
-        "Previous Rank", "Current Value", "Current Rank", "Next Period", "Next Value",
-        "Next Rank", "Top-N Cutoff", "Risk Estimate", "Why Flagged",
+    risk_columns = [
+        "Entity", "Error Period", "Severity", "Problem Type", "Previous Period", "Previous Value",
+        "Previous Rank", "Current Value", "Current Rank", "Next Period", "Next Value", "Next Rank",
+        "Top-N Cutoff", "Risk Estimate", "Why Flagged", "What To Do",
     ]
-    return pd.DataFrame(rows, columns=columns), ranking
+    skipped_columns = ["Entity", "Period", "Lifecycle Status", "Rule", "Why"]
+    return (
+        pd.DataFrame(rows, columns=risk_columns),
+        ranking,
+        pd.DataFrame(skipped_rows, columns=skipped_columns),
+    )
 
 
 def classify_top_n_safety(core_findings: pd.DataFrame, risk_table: pd.DataFrame) -> str:
-    """YES=no known ranking blockers, NO=definite structural blocker, UNRESOLVED=risk needs review."""
     if not core_findings.empty:
         structural_blockers = {
             "Missing Entity Column", "Blank Entity Name", "Duplicate Entity", "Duplicate Row",
             "Duplicate Period", "Periods Out of Order", "No Period Columns", "Non-Numeric Value",
         }
-        blocker_mask = (
-            core_findings["Severity"].eq("MUST FIX")
-            & core_findings["Category"].isin(structural_blockers)
-        )
+        blocker_mask = core_findings["Severity"].eq("MUST FIX") & core_findings["Category"].isin(structural_blockers)
         if blocker_mask.any():
             return "NO"
         if (core_findings["Category"] == "Missing Period").any():
