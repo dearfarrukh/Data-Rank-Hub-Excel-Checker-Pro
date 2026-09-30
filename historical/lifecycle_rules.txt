@@ -1,4 +1,7 @@
-# DATA RANK HUB — LIFECYCLE RULES
-# Stage 1 placeholder.
-# Never treat a lifecycle blank as zero automatically.
-# Never interpolate across a protected historical transition automatically.
+# DATA RANK HUB — LIFECYCLE POLICY
+# 1. Blanks before valid_from_year or after valid_to_year are HISTORICAL EXPECTED, not missing-data errors.
+# 2. Blanks inside protected transition years are PROTECTED TRANSITION items and are not auto-filled.
+# 3. Historical rules never replace blanks with zero.
+# 4. Historical rules never merge predecessor/successor entities automatically.
+# 5. AUTO SERIES FILL must not cross a protected transition boundary without explicit review.
+# 6. Rules are conservative and configurable; dataset-specific production start/end years remain coverage information unless separately verified.

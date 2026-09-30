@@ -1,9 +1,23 @@
 # DATA RANK HUB — HISTORICAL ENTITY RULES
-# Stage 1 placeholder. Historical lifecycle logic is intentionally not active yet.
-# It will be added after core checker rules and Top-N engine are tested.
-#
-# Planned examples:
-# East Germany / West Germany -> Germany
-# USSR -> Russia and successor republics
-# Czechoslovakia -> Czechia / Slovakia
-# Yugoslavia -> successor states
+# Format:
+# canonical|aliases separated by ;|valid_from_year|valid_to_year|protected_years separated by ;|notes
+# Blank valid_from/valid_to means no boundary is enforced.
+# These rules classify expected historical blanks only. They never create numeric values.
+
+East Germany|German Democratic Republic;GDR||1990|1989;1990;1991|German reunification transition
+West Germany|Federal Republic of Germany (West Germany)||1990|1989;1990;1991|German reunification transition
+Germany|Unified Germany|1990||1989;1990;1991|Unified Germany lifecycle boundary
+USSR|Soviet Union;U.S.S.R.;Union of Soviet Socialist Republics||1991|1990;1991;1992|USSR dissolution transition
+Russia|Russian Federation|1992||1990;1991;1992|Post-USSR lifecycle boundary
+Czechoslovakia|||1992|1992;1993|Czechoslovakia dissolution transition
+Czechia|Czech Republic|1993||1992;1993|Post-Czechoslovakia lifecycle boundary
+Slovakia||1993||1992;1993|Post-Czechoslovakia lifecycle boundary
+Yugoslavia|Socialist Federal Republic of Yugoslavia;SFRY||1991|1990;1991;1992|SFRY breakup transition
+Slovenia||1991||1990;1991;1992|Yugoslavia breakup transition
+Croatia||1991||1990;1991;1992|Yugoslavia breakup transition
+North Macedonia|Macedonia;Republic of Macedonia|1991||1990;1991;1992|Yugoslavia breakup transition
+Bosnia and Herzegovina|Bosnia-Herzegovina;Bosnia & Herzegovina|1992||1991;1992;1993|Yugoslavia breakup transition
+Federal Republic of Yugoslavia|FR Yugoslavia;FRY|1992|2002|1991;1992;2002;2003|Serbia/Montenegro federal transition
+Serbia and Montenegro||2003|2006|2002;2003;2006|Serbia/Montenegro union transition
+Serbia||2006||2005;2006|Serbia and Montenegro dissolution transition
+Montenegro||2006||2005;2006|Serbia and Montenegro dissolution transition
