@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from modules.correction_manager import forced_expected
 from modules.lifecycle import classify_lifecycle, load_lifecycle_rules, rule_lookup
 
 
@@ -15,7 +16,6 @@ class RankingResult:
 
 
 def build_ranking_matrix(numeric_matrix: pd.DataFrame, top_n: int) -> RankingResult:
-    """Rank every period independently. Highest value receives rank 1."""
     ranks = numeric_matrix.rank(axis=0, method="min", ascending=False, na_option="keep")
     cutoffs: dict[str, float | None] = {}
     for column in numeric_matrix.columns:
@@ -46,6 +46,12 @@ def _linear_estimate(left_value: float, right_value: float, left_index: int, rig
     return float(left_value + (right_value - left_value) * fraction)
 
 
+def _ratio(value: float | None, cutoff: float | None) -> float | None:
+    if value is None or cutoff is None or cutoff == 0:
+        return None
+    return float(value) / float(cutoff)
+
+
 def evaluate_missing_cell_risk(
     row_index,
     period_index: int,
@@ -54,8 +60,15 @@ def evaluate_missing_cell_risk(
     ranking: RankingResult,
     rank_margin: int = 2,
     boundary_max_distance: int = 1,
+    boundary_cutoff_ratio: float = 0.75,
+    internal_cutoff_ratio: float = 0.75,
 ) -> dict:
-    """Evaluate one missing cell using local period evidence only."""
+    """Evaluate one missing cell from local evidence only.
+
+    Boundary gaps need a directly adjacent anchor and meaningful value evidence relative
+    to that period's Top-N cutoff. This prevents a low-value rank 16/17 from becoming a
+    false Must Check just because few countries have data early in the series.
+    """
     row = numeric_matrix.loc[row_index]
     values = [None if pd.isna(v) else float(v) for v in row.tolist()]
     left_i = _nearest_numeric_position(values, period_index, -1)
@@ -77,27 +90,37 @@ def evaluate_missing_cell_risk(
 
     reasons: list[str] = []
     estimated_value = None
-    estimated_rank_risk = False
 
-    # Internal gaps: both anchors can provide local evidence.
     if left_i is not None and right_i is not None:
-        if prev_rank is not None and prev_rank <= ranking.top_n + rank_margin:
-            reasons.append(f"previous available rank was {prev_rank}")
-        if next_rank is not None and next_rank <= ranking.top_n + rank_margin:
-            reasons.append(f"next available rank was {next_rank}")
-        if cutoff is not None:
-            estimated_value = _linear_estimate(prev_value, next_value, left_i, right_i, period_index)
-            if estimated_value >= cutoff:
-                estimated_rank_risk = True
-                reasons.append("between-anchor estimate reaches the selected Top-N cutoff")
+        estimated_value = _linear_estimate(prev_value, next_value, left_i, right_i, period_index)
+        est_ratio = _ratio(estimated_value, cutoff)
+        strong_rank = (
+            (prev_rank is not None and prev_rank <= ranking.top_n)
+            or (next_rank is not None and next_rank <= ranking.top_n)
+        )
+        near_rank = (
+            (prev_rank is not None and prev_rank <= ranking.top_n + rank_margin)
+            or (next_rank is not None and next_rank <= ranking.top_n + rank_margin)
+        )
+        if cutoff is not None and est_ratio is not None and est_ratio >= 1.0:
+            reasons.append(f"between-anchor estimate is {est_ratio:.2f}× the Top-{ranking.top_n} cutoff")
+        elif cutoff is not None and est_ratio is not None and est_ratio >= internal_cutoff_ratio and (strong_rank or near_rank):
+            reasons.append(f"between-anchor estimate is close to the Top-{ranking.top_n} cutoff ({est_ratio:.2f}×)")
+        elif strong_rank and cutoff is None:
+            reasons.append("adjacent known rank is inside the selected Top-N")
     else:
-        # Leading/trailing coverage: only trust an immediately adjacent boundary anchor.
         anchor_i = left_i if left_i is not None else right_i
         anchor_rank = prev_rank if left_i is not None else next_rank
+        anchor_value = prev_value if left_i is not None else next_value
+        side = "previous" if left_i is not None else "next"
         if anchor_i is not None and abs(anchor_i - period_index) <= boundary_max_distance:
-            if anchor_rank is not None and anchor_rank <= ranking.top_n + rank_margin:
-                side = "previous" if left_i is not None else "next"
-                reasons.append(f"adjacent {side} available rank was {anchor_rank}")
+            ratio = _ratio(anchor_value, cutoff)
+            if cutoff is not None and ratio is not None and ratio >= 1.0:
+                reasons.append(f"adjacent {side} value is {ratio:.2f}× the Top-{ranking.top_n} cutoff")
+            elif cutoff is not None and ratio is not None and ratio >= boundary_cutoff_ratio and anchor_rank is not None and anchor_rank <= ranking.top_n + rank_margin:
+                reasons.append(f"adjacent {side} value is close to the Top-{ranking.top_n} cutoff ({ratio:.2f}×)")
+            elif cutoff is None and anchor_rank is not None and anchor_rank <= ranking.top_n:
+                reasons.append(f"adjacent {side} rank was {anchor_rank}")
 
     return {
         "period": period,
@@ -111,7 +134,6 @@ def evaluate_missing_cell_risk(
         "estimated_value": estimated_value,
         "risk": bool(reasons),
         "reason": "; ".join(reasons),
-        "estimated_rank_risk": estimated_rank_risk,
     }
 
 
@@ -122,6 +144,7 @@ def build_top_n_risk_table(
     top_n: int,
     rank_margin: int = 2,
     lifecycle_rules=None,
+    user_overrides: list[dict] | None = None,
 ) -> tuple[pd.DataFrame, RankingResult, pd.DataFrame]:
     ranking = build_ranking_matrix(numeric_matrix, top_n)
     rules = lifecycle_rules if lifecycle_rules is not None else load_lifecycle_rules()
@@ -133,6 +156,17 @@ def build_top_n_risk_table(
         entity = str(df.loc[row_index, "Entity"]).strip()
         for i, period in enumerate(period_columns):
             if not pd.isna(numeric_matrix.loc[row_index, period]):
+                continue
+
+            forced, forced_reason = forced_expected(entity, str(period), user_overrides)
+            if forced:
+                skipped_rows.append({
+                    "Entity": entity,
+                    "Period": str(period),
+                    "Lifecycle Status": "USER_FORCE_CORRECT",
+                    "Rule": "User override",
+                    "Why": forced_reason,
+                })
                 continue
 
             lifecycle_status, lifecycle_rule = classify_lifecycle(entity, period, lookup)
@@ -172,7 +206,7 @@ def build_top_n_risk_table(
                 "Top-N Cutoff": risk["cutoff"],
                 "Risk Estimate": risk["estimated_value"],
                 "Why Flagged": risk["reason"],
-                "What To Do": "Verify the source. Do not fill blindly; safe fill is added only after lifecycle protection.",
+                "What To Do": "Verify the source, enter the correct value, use a safe fill if eligible, or Force Correct the blank with a documented reason.",
             })
 
     risk_columns = [
@@ -188,7 +222,7 @@ def build_top_n_risk_table(
     )
 
 
-def classify_top_n_safety(core_findings: pd.DataFrame, risk_table: pd.DataFrame) -> str:
+def classify_top_n_safety(core_findings: pd.DataFrame, unresolved_risk_table: pd.DataFrame) -> str:
     if not core_findings.empty:
         structural_blockers = {
             "Missing Entity Column", "Blank Entity Name", "Duplicate Entity", "Duplicate Row",
@@ -199,6 +233,6 @@ def classify_top_n_safety(core_findings: pd.DataFrame, risk_table: pd.DataFrame)
             return "NO"
         if (core_findings["Category"] == "Missing Period").any():
             return "UNRESOLVED"
-    if not risk_table.empty:
+    if unresolved_risk_table is not None and not unresolved_risk_table.empty:
         return "UNRESOLVED"
     return "YES"
