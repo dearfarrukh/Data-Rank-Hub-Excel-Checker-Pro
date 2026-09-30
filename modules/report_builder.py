@@ -23,18 +23,18 @@ def final_status(findings_df: pd.DataFrame) -> str:
     return "READY"
 
 
-def top_n_safety_placeholder() -> str:
-    # Top-N risk engine is deliberately not active until Stage 3.
-    return "UNRESOLVED"
-
-
 def category_summary(findings_df: pd.DataFrame) -> pd.DataFrame:
     if findings_df.empty:
         return pd.DataFrame(columns=["Severity", "Category", "Count"])
-    return (
+    severity_rank = {name: i for i, name in enumerate(SEVERITY_ORDER)}
+    out = (
         findings_df.groupby(["Severity", "Category"], dropna=False)
         .size()
         .reset_index(name="Count")
-        .sort_values(["Severity", "Count", "Category"], ascending=[True, False, True])
+    )
+    out["__order"] = out["Severity"].map(severity_rank).fillna(99)
+    return (
+        out.sort_values(["__order", "Count", "Category"], ascending=[True, False, True])
+        .drop(columns="__order")
         .reset_index(drop=True)
     )
