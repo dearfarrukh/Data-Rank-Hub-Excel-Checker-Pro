@@ -2,32 +2,23 @@
 
 Fresh modular rebuild of the Data Rank Hub historical/ranking dataset checker.
 
-## Stage 1
+## Stage 4
 
-- Excel `.xlsx` / `.xls` upload
-- CSV upload
-- Sheet selection
-- Automatic Checker-vs-AlienArt orientation detection
-- Annual, monthly, quarterly period parsing
-- Internal normalization to `Entity | Period...`
-- Original orientation metadata retained for later export
-- Automated orientation tests
+- Excel `.xlsx` / `.xls` and CSV upload
+- Checker-format and AlienArt-format orientation detection
+- Annual / monthly / quarterly period parsing
+- V10 core structural and numeric checks
+- Period-by-period Top-N risk engine
+- Historical lifecycle protection from configurable rules
+- Clear user-facing problem table with Entity, Period, Problem, Why Flagged, and What To Do
+- Separate Core Data Status and Top-N Ranking Safety
+- Historical expected/protected blanks kept out of ordinary missing-data risk
+- Original orientation remembered for future corrected-file export
 
-## Run locally
+## Historical policy
 
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
+Historical lifecycle rules are stored in `historical/entity_rules.txt`. They are conservative and configurable. They never merge entities, invent values, or replace blanks with zero.
 
-## Test
+## Next stage
 
-```bash
-pytest -q
-```
-
-## Deployment
-
-Repository: `Data-Rank-Hub-Excel-Checker-Pro`  
-Branch: `main`  
-Main file: `app.py`
+Stage 5 adds previewed **AUTO FILL ALL SAFE GAPS** with audit logging and protected-transition exclusions.

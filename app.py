@@ -7,9 +7,10 @@ import streamlit as st
 
 from modules.error_checker import CheckerConfig, run_core_checks
 from modules.file_reader import get_sheet_names, read_table
+from modules.lifecycle import build_lifecycle_summary, load_lifecycle_rules
 from modules.orientation import detect_orientation, normalize_to_checker
 from modules.ranking_engine import build_top_n_risk_table, classify_top_n_safety
-from modules.report_builder import category_summary, final_status, severity_counts
+from modules.report_builder import build_action_table, category_summary, final_status, severity_counts
 
 
 st.set_page_config(page_title="Data Rank Hub Excel Checker Pro", page_icon="📊", layout="wide")
@@ -17,8 +18,8 @@ st.set_page_config(page_title="Data Rank Hub Excel Checker Pro", page_icon="📊
 st.title("Data Rank Hub Excel Checker Pro")
 st.caption("UPLOAD → CHECK → REVIEW → FIX → RECHECK → DOWNLOAD")
 st.info(
-    "Stage 3: core checker + year-by-year Top-N risk + simpler review experience. "
-    "Historical lifecycle protection and Auto Series Fill come next after this stage is tested."
+    "Stage 4: clear problem display + historical lifecycle protection + smarter period-by-period Top-N risk. "
+    "Safe Auto Series Fill is the next stage."
 )
 
 uploaded_file = st.file_uploader(
@@ -70,9 +71,7 @@ except Exception as exc:
     st.error(f"Could not normalize this table: {exc}")
     st.stop()
 
-st.caption(
-    f"Detected {orientation.frequency or 'unknown'} periods. Original layout is remembered for future corrected-file export."
-)
+st.caption(f"Detected {orientation.frequency or 'unknown'} periods. Original layout is remembered for corrected-file export.")
 with st.expander("Preview uploaded data"):
     st.dataframe(original_df.head(30), use_container_width=True, hide_index=True)
 with st.expander("Technical: internal checker view"):
@@ -86,7 +85,7 @@ with left:
         options=[10, 15, 20, 25, 30],
         index=1,
         format_func=lambda n: f"Top {n}",
-        help="Top-N is calculated separately for every period. The checker does not use an entity's best rank across its whole history.",
+        help="Ranking is calculated separately for every period.",
     )
 with right:
     data_mode = st.selectbox(
@@ -118,104 +117,151 @@ if check_clicked:
         check_negative_values=bool(check_negative_values),
     )
     result = run_core_checks(normalized_df, config)
-    risk_table, ranking = build_top_n_risk_table(
-        normalized_df, result.period_columns, result.numeric_matrix, int(top_n)
-    ) if result.period_columns else (pd.DataFrame(), None)
-    st.session_state["stage3_result"] = result
-    st.session_state["stage3_risk_table"] = risk_table
-    st.session_state["stage3_signature"] = settings_signature
+    lifecycle_rules = load_lifecycle_rules()
+    if result.period_columns:
+        risk_table, ranking, lifecycle_skips = build_top_n_risk_table(
+            normalized_df,
+            result.period_columns,
+            result.numeric_matrix,
+            int(top_n),
+            lifecycle_rules=lifecycle_rules,
+        )
+        lifecycle_summary = build_lifecycle_summary(
+            normalized_df, result.period_columns, result.numeric_matrix, lifecycle_rules
+        )
+    else:
+        risk_table, ranking = pd.DataFrame(), None
+        lifecycle_skips = pd.DataFrame()
+        lifecycle_summary = pd.DataFrame()
 
-if st.session_state.get("stage3_signature") != settings_signature:
+    st.session_state["stage4_result"] = result
+    st.session_state["stage4_risk_table"] = risk_table
+    st.session_state["stage4_lifecycle_skips"] = lifecycle_skips
+    st.session_state["stage4_lifecycle_summary"] = lifecycle_summary
+    st.session_state["stage4_signature"] = settings_signature
+
+if st.session_state.get("stage4_signature") != settings_signature:
     st.caption("Choose the settings above and press CHECK DATASET.")
     st.stop()
 
-result = st.session_state.get("stage3_result")
-risk_table = st.session_state.get("stage3_risk_table", pd.DataFrame())
+result = st.session_state.get("stage4_result")
+risk_table = st.session_state.get("stage4_risk_table", pd.DataFrame())
+lifecycle_skips = st.session_state.get("stage4_lifecycle_skips", pd.DataFrame())
+lifecycle_summary = st.session_state.get("stage4_lifecycle_summary", pd.DataFrame())
 if result is None:
     st.stop()
 
 findings_df = result.findings_frame()
-counts = severity_counts(findings_df)
+core_counts = severity_counts(findings_df)
 core_status = final_status(findings_df)
 top_n_status = classify_top_n_safety(findings_df, risk_table)
+action_table = build_action_table(findings_df, risk_table)
+
+# Top-N risk rows are actual MUST CHECK items in Stage 4.
+combined_must_check = int(core_counts.get("MUST CHECK", 0)) + int(len(risk_table))
 internal_gaps = int((findings_df["Category"] == "Internal Gap").sum()) if not findings_df.empty else 0
+historical_expected = 0
+protected_transition = 0
+if not lifecycle_summary.empty:
+    historical_expected = int(lifecycle_summary["Expected Historical Blanks"].sum())
+    protected_transition = int(lifecycle_summary["Protected Transition Blanks"].sum())
 
 st.subheader("3. Results")
 m1, m2, m3, m4, m5, m6 = st.columns(6)
-m1.metric("Must Fix", counts.get("MUST FIX", 0))
-m2.metric("Must Check", counts.get("MUST CHECK", 0))
-m3.metric("Review", counts.get("REVIEW", 0))
+m1.metric("Must Fix", core_counts.get("MUST FIX", 0))
+m2.metric("Must Check", combined_must_check)
+m3.metric("Review", core_counts.get("REVIEW", 0))
 m4.metric("Internal Gaps", internal_gaps)
 m5.metric(f"Top {top_n} Risk", len(risk_table))
-m6.metric("Core Data", core_status)
+m6.metric("Historical Expected", historical_expected)
 
-st.markdown(f"**Top-N Ranking Safety:** `{top_n_status}`")
-if core_status == "READY" and top_n_status == "YES":
-    st.success("No critical core issues or identified Top-N missing-data risks were found in the active checks.")
-elif top_n_status == "NO":
-    st.error("A definite structural/data problem can affect ranking. Fix Must Fix items before using the ranking.")
-elif top_n_status == "UNRESOLVED":
-    st.warning(f"Ranking safety is not certified yet. Review the Top {top_n} risk items below.")
-else:
-    st.warning("Review the items below before final use.")
+status_left, status_right = st.columns(2)
+with status_left:
+    st.markdown(f"**Core Data Status:** `{core_status}`")
+with status_right:
+    st.markdown(f"**Top-N Ranking Safety:** `{top_n_status}`")
 
-# A direct next-action guide makes the screen useful without reading every table.
-if counts.get("MUST FIX", 0):
-    st.write(f"**Recommended next action:** Fix the {counts['MUST FIX']} Must Fix item(s) first.")
-elif counts.get("MUST CHECK", 0):
-    st.write(f"**Recommended next action:** Verify the {counts['MUST CHECK']} Must Check item(s), then recheck.")
-elif len(risk_table):
-    st.write(f"**Recommended next action:** Review {len(risk_table)} missing value(s) that may affect Top {top_n}.")
-elif counts.get("REVIEW", 0):
-    st.write(f"**Recommended next action:** Core data is clear; {counts['REVIEW']} Review item(s) are optional verification points.")
+if core_counts.get("MUST FIX", 0):
+    st.error(f"Fix {core_counts['MUST FIX']} definite problem(s) before using this dataset.")
+elif combined_must_check:
+    st.warning(f"{combined_must_check} item(s) need verification before Top {top_n} can be certified.")
+elif core_counts.get("REVIEW", 0):
+    st.success(f"No critical blockers found. {core_counts['REVIEW']} review item(s) are optional verification points.")
 else:
-    st.write("**Recommended next action:** No action required from the active Stage-3 checks.")
+    st.success("No active core or Top-N blockers were found.")
 
-st.subheader(f"4. Top {top_n} ranking risk")
-st.caption(
-    "The checker evaluates each period separately. A missing value is flagged only when nearby period evidence suggests it could realistically matter to the selected Top-N. "
-    "Risk estimates are for review only; they are never written into your data."
-)
-if risk_table.empty:
-    st.success(f"No missing cells were identified as likely Top {top_n} risks by the active Stage-3 rules.")
-else:
-    entity_options = ["All"] + sorted(risk_table["Entity"].dropna().astype(str).unique().tolist())
-    selected_entity = st.selectbox("Review entity", entity_options, key="risk_entity")
-    shown_risk = risk_table if selected_entity == "All" else risk_table[risk_table["Entity"] == selected_entity]
-    st.dataframe(shown_risk, use_container_width=True, hide_index=True)
+if historical_expected or protected_transition:
     st.info(
-        "What this means: these values are missing and local ranking evidence says they may matter. "
-        "Do not fill them blindly; verify the source or wait for the Safe Series Fill stage."
+        f"Historical lifecycle protection recognized {historical_expected} expected blank(s) and "
+        f"{protected_transition} protected transition blank(s). These are not treated as ordinary missing-data errors."
     )
 
-st.subheader("5. Other findings")
-if findings_df.empty:
-    st.success("No findings from the active core checks.")
+if core_counts.get("MUST FIX", 0):
+    st.write("**Recommended next action:** Open **Problems to review** and fix the MUST FIX rows first.")
+elif combined_must_check:
+    st.write("**Recommended next action:** Review the MUST CHECK rows below and verify them against the source.")
+elif core_counts.get("REVIEW", 0):
+    st.write("**Recommended next action:** Dataset can proceed from the active critical checks; review suspicious items if needed.")
 else:
-    quick_filter = st.radio(
-        "Show",
-        ["Needs attention", "Must Fix", "Must Check", "Review", "All"],
-        horizontal=True,
-    )
-    if quick_filter == "Needs attention":
-        filtered = findings_df[findings_df["Severity"].isin(["MUST FIX", "MUST CHECK"])]
-    elif quick_filter == "All":
-        filtered = findings_df
-    else:
-        severity_name = quick_filter.upper() if quick_filter != "Must Fix" and quick_filter != "Must Check" else quick_filter.upper()
-        filtered = findings_df[findings_df["Severity"] == severity_name]
+    st.write("**Recommended next action:** No action required from the active Stage-4 checks.")
 
-    if filtered.empty:
+st.subheader("4. Problems to review")
+st.caption("This is the main work list: Entity + Period + exact problem + why it was flagged + what to do next.")
+if action_table.empty:
+    st.success("No problems found by the active checks.")
+else:
+    f1, f2 = st.columns([1, 2])
+    with f1:
+        severity_filter = st.selectbox("Severity", ["Needs attention", "MUST FIX", "MUST CHECK", "REVIEW", "All"])
+    with f2:
+        entities = ["All entities"] + sorted([e for e in action_table["Entity"].dropna().astype(str).unique().tolist() if e])
+        entity_filter = st.selectbox("Entity", entities)
+
+    shown = action_table.copy()
+    if severity_filter == "Needs attention":
+        shown = shown[shown["Severity"].isin(["MUST FIX", "MUST CHECK"])]
+    elif severity_filter != "All":
+        shown = shown[shown["Severity"] == severity_filter]
+    if entity_filter != "All entities":
+        shown = shown[shown["Entity"] == entity_filter]
+
+    if shown.empty:
         st.success("Nothing in this filter.")
     else:
-        st.dataframe(filtered, use_container_width=True, hide_index=True)
+        visible_columns = [
+            "Severity", "Entity", "Period", "Problem", "Current Value", "Previous Value", "Previous Rank",
+            "Next Value", "Next Rank", "Top-N Cutoff", "Why Flagged", "What To Do",
+        ]
+        st.dataframe(shown[visible_columns], use_container_width=True, hide_index=True)
 
+st.subheader(f"5. Top {top_n} ranking details")
+if risk_table.empty:
+    st.success(f"No unresolved missing cells were identified as realistic Top {top_n} risks after lifecycle filtering.")
+else:
+    st.caption("Each row is period-specific. Historical expected blanks are removed before this table is built.")
+    st.dataframe(risk_table, use_container_width=True, hide_index=True)
+
+with st.expander("Historical lifecycle details"):
+    if lifecycle_summary.empty:
+        st.caption("No configured historical lifecycle rule matched entities in this dataset.")
+    else:
+        st.dataframe(lifecycle_summary, use_container_width=True, hide_index=True)
+    if not lifecycle_skips.empty:
+        st.caption("Protected/expected blank periods excluded from Top-N risk:")
+        st.dataframe(lifecycle_skips, use_container_width=True, hide_index=True)
+
+st.subheader("6. Other core findings")
+if findings_df.empty:
+    st.success("No core findings.")
+else:
     with st.expander("Counts by problem type"):
         st.dataframe(category_summary(findings_df), use_container_width=True, hide_index=True)
+    with st.expander("Full core findings table"):
+        st.dataframe(findings_df, use_container_width=True, hide_index=True)
 
-st.subheader("6. Coverage")
+st.subheader("7. Coverage")
 st.caption(
-    "Leading and trailing blanks are coverage information for now. Historical lifecycle rules will decide whether they are expected or need checking in the next stage."
+    "Leading/trailing blanks remain coverage information unless a configured lifecycle rule classifies them or local ranking evidence makes an adjacent boundary period relevant."
 )
 st.dataframe(result.completeness, use_container_width=True, hide_index=True)
 
@@ -228,7 +274,9 @@ with st.expander("Technical details"):
         "frequency": orientation.frequency,
         "recognized_period_columns": len(result.period_columns),
         "entities": len(normalized_df),
-        "top_n_engine": f"Active — period-by-period Top {top_n}",
-        "historical_lifecycle": "Not active yet — Stage 4",
-        "auto_series_fill": "Not active yet — after lifecycle protection",
+        "top_n_engine": f"Active — period-by-period Top {top_n}, lifecycle-aware",
+        "historical_lifecycle": "Active — configurable rules",
+        "historical_expected_blanks": historical_expected,
+        "protected_transition_blanks": protected_transition,
+        "auto_series_fill": "Not active yet — Stage 5",
     })
