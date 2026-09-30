@@ -206,10 +206,45 @@ else:
     st.write("**Recommended next action:** No action required from the active Stage-4 checks.")
 
 st.subheader("4. Problems to review")
-st.caption("This is the main work list: Entity + Period + exact problem + why it was flagged + what to do next.")
+st.caption("This is the main work list. Important problems are shown as visible cards first, followed by the full filterable table.")
 if action_table.empty:
     st.success("No problems found by the active checks.")
 else:
+    # Always surface actionable rows as visible cards so the user never has to hunt inside a dataframe.
+    priority_rows = action_table[action_table["Severity"].isin(["MUST FIX", "MUST CHECK"])].copy()
+    if not priority_rows.empty:
+        st.markdown("### Needs your attention")
+        for _, issue in priority_rows.iterrows():
+            severity = str(issue.get("Severity", ""))
+            entity = str(issue.get("Entity", "")) or "Unknown entity"
+            period = str(issue.get("Period", "")) or "Unknown period"
+            problem = str(issue.get("Problem", "")) or "Problem"
+            header = f"{entity} — {period} — {problem}"
+            if severity == "MUST FIX":
+                st.error(f"MUST FIX: {header}")
+            else:
+                st.warning(f"MUST CHECK: {header}")
+
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.markdown(f"**Previous value:** {issue.get('Previous Value', '') or '—'}")
+                st.markdown(f"**Previous rank:** {issue.get('Previous Rank', '') or '—'}")
+            with c2:
+                st.markdown(f"**Next value:** {issue.get('Next Value', '') or '—'}")
+                st.markdown(f"**Next rank:** {issue.get('Next Rank', '') or '—'}")
+            with c3:
+                st.markdown(f"**Top-N cutoff:** {issue.get('Top-N Cutoff', '') or '—'}")
+                st.markdown(f"**Current value:** {issue.get('Current Value', '') or 'Missing'}")
+
+            why = str(issue.get("Why Flagged", "") or "")
+            todo = str(issue.get("What To Do", "") or "")
+            if why:
+                st.markdown(f"**Why flagged:** {why}")
+            if todo:
+                st.markdown(f"**What to do:** {todo}")
+            st.divider()
+
+    st.markdown("### Full problem list")
     f1, f2 = st.columns([1, 2])
     with f1:
         severity_filter = st.selectbox("Severity", ["Needs attention", "MUST FIX", "MUST CHECK", "REVIEW", "All"])
