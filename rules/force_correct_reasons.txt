@@ -1,0 +1,9 @@
+# DATA RANK HUB — FORCE CORRECT REASONS
+Production not started yet
+Entity did not exist yet
+Covered by predecessor country
+Series intentionally starts here
+Series intentionally ends here
+Blank is correct
+Keep original as correct
+Custom reason
