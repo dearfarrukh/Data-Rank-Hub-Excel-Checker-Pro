@@ -1,1 +1,10 @@
+# DATA RANK HUB — HISTORICAL ENTITY RULES
+# Stage 1 placeholder. Historical lifecycle logic is intentionally not active yet.
+# It will be added after core checker rules and Top-N engine are tested.
+#
+# Planned examples:
+# East Germany / West Germany -> Germany
+# USSR -> Russia and successor republics
+# Czechoslovakia -> Czechia / Slovakia
+# Yugoslavia -> successor states
 
