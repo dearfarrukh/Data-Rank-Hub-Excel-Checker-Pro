@@ -161,10 +161,10 @@ def _cell_and_gap_checks(df: pd.DataFrame, period_columns: list, findings: list[
         ]
         for gap in compress_missing_ranges(missing_inside, period_columns):
             _add(
-                findings, "Internal Gap", "MUST CHECK",
+                findings, "Internal Gap", "REVIEW",
                 entity=entity, period=gap.label,
                 details=f"{gap.length} missing period(s) inside the series on data row {row_index + 2}.",
-                suggestion="Review source data. This can later be a Safe Series Fill candidate if both anchors are valid.",
+                suggestion="Review the gap. If both anchors are valid and no Top-N risk is detected, Safe Series Fill may be used.",
                 fixable=True,
             )
 

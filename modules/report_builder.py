@@ -39,8 +39,23 @@ def build_action_table(findings_df: pd.DataFrame, risk_table: pd.DataFrame, cove
     ]
     rows: list[dict] = []
 
+    risk_keys = set()
+    if risk_table is not None and not risk_table.empty:
+        risk_keys = {
+            (str(r.get("Entity", "")).strip(), str(r.get("Error Period", "")).strip())
+            for _, r in risk_table.iterrows()
+        }
+
     if not findings_df.empty:
         for _, item in findings_df.iterrows():
+            # For a one-period internal gap that is already a Top-N risk, show
+            # one clear MUST CHECK card instead of a duplicate REVIEW card.
+            if (
+                str(item.get("Category", "")) == "Internal Gap"
+                and "→" not in str(item.get("Period", ""))
+                and (str(item.get("Entity", "")).strip(), str(item.get("Period", "")).strip()) in risk_keys
+            ):
+                continue
             rows.append({
                 "Severity": item.get("Severity", ""),
                 "Entity": item.get("Entity", ""),

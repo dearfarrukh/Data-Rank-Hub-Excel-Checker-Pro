@@ -6,6 +6,7 @@ import pandas as pd
 
 from modules.audit_log import make_audit_entry
 from modules.correction_manager import forced_expected
+from modules.data_cleaner import classify_cell
 from modules.lifecycle import classify_lifecycle, load_lifecycle_rules, rule_lookup
 from modules.orientation import parse_period
 
@@ -55,11 +56,13 @@ def find_safe_fill_candidates(
     period_columns: list[str],
     lifecycle_rules=None,
     user_overrides: list[dict] | None = None,
+    excluded_cells: set[tuple[str, str]] | None = None,
 ) -> pd.DataFrame:
     rules = lifecycle_rules if lifecycle_rules is not None else load_lifecycle_rules()
     lookup = rule_lookup(rules)
     rows: list[dict] = []
     decimals = detect_decimals(df, period_columns)
+    excluded_cells = excluded_cells or set()
 
     for row_index in df.index:
         entity = str(df.at[row_index, "Entity"]).strip()
@@ -73,6 +76,13 @@ def find_safe_fill_candidates(
             if not pd.isna(values[i]):
                 continue
             period = str(period_columns[i])
+            # Only true blanks are eligible. Invalid text such as BAD_TEXT must
+            # remain a data error and must never be silently interpolated.
+            raw_kind, _ = classify_cell(df.at[row_index, period_columns[i]])
+            if raw_kind != "blank":
+                continue
+            if (entity, period) in excluded_cells:
+                continue
             forced, _ = forced_expected(entity, period, user_overrides)
             if forced:
                 continue

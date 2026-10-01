@@ -99,35 +99,75 @@ def add_ranking_context(action_table: pd.DataFrame, working_df: pd.DataFrame, ra
     out = action_table.copy()
 
     # Streamlit Cloud / recent pandas may preserve text columns as Arrow-backed
-    # string arrays. Ranking context later writes numbers into these columns,
-    # which raises TypeError unless the columns can hold mixed display values.
-    # Keep them as object columns because the review table intentionally mixes
-    # numeric values with blanks / "Not available" display states.
-    ranking_context_columns = [
-        "Current Rank",
-        "Previous Rank",
-        "Next Rank",
-        "Top-N Cutoff",
+    # string arrays. These review fields intentionally mix numbers and blanks.
+    context_columns = [
+        "Current Rank", "Previous Value", "Previous Rank", "Next Value", "Next Rank", "Top-N Cutoff",
     ]
-    for col in ranking_context_columns:
+    for col in context_columns:
         if col not in out.columns:
             out[col] = pd.Series([None] * len(out), index=out.index, dtype="object")
         else:
             out[col] = out[col].astype("object")
+
+    period_columns = [str(c) for c in ranking.ranks.columns]
+
+    def _gap_bounds(label: str):
+        label = str(label or "").strip()
+        if label in period_columns:
+            i = period_columns.index(label)
+            return i, i
+        if "→" in label:
+            left, right = [x.strip() for x in label.split("→", 1)]
+            if left in period_columns and right in period_columns:
+                return period_columns.index(left), period_columns.index(right)
+        return None, None
+
     for i, row in out.iterrows():
         entity = str(row.get("Entity", "")).strip()
         period = str(row.get("Period", "")).strip()
-        if not entity or period not in ranking.ranks.columns:
+        if not entity:
             continue
         matches = working_df.index[working_df["Entity"].astype(str).str.strip().eq(entity)]
         if len(matches) != 1:
             continue
         idx = matches[0]
-        rank = ranking.ranks.at[idx, period]
-        if not pd.isna(rank):
-            out.at[i, "Current Rank"] = int(rank)
-        if not row.get("Top-N Cutoff", ""):
-            cutoff = ranking.cutoffs.get(period)
+        start_i, end_i = _gap_bounds(period)
+        if start_i is None:
+            continue
+
+        # Exact/current rank and cutoff use the first affected period.
+        current_period = period_columns[start_i]
+        raw_rank = ranking.ranks.at[idx, current_period]
+        if not pd.isna(raw_rank):
+            out.at[i, "Current Rank"] = int(raw_rank)
+        if row.get("Top-N Cutoff", "") in ("", None) or pd.isna(row.get("Top-N Cutoff", None)):
+            cutoff = ranking.cutoffs.get(current_period)
             if cutoff is not None:
                 out.at[i, "Top-N Cutoff"] = cutoff
+
+        # For gap cards, show the nearest numeric anchors outside the gap.
+        if str(row.get("Problem", "")) == "Internal Gap":
+            left_i = start_i - 1
+            while left_i >= 0:
+                v = pd.to_numeric(pd.Series([working_df.at[idx, period_columns[left_i]]]), errors="coerce").iloc[0]
+                if not pd.isna(v):
+                    out.at[i, "Previous Value"] = float(v)
+                    rr = ranking.ranks.at[idx, period_columns[left_i]]
+                    if not pd.isna(rr):
+                        out.at[i, "Previous Rank"] = int(rr)
+                    break
+                left_i -= 1
+
+            right_i = end_i + 1
+            while right_i < len(period_columns):
+                v = pd.to_numeric(pd.Series([working_df.at[idx, period_columns[right_i]]]), errors="coerce").iloc[0]
+                if not pd.isna(v):
+                    out.at[i, "Next Value"] = float(v)
+                    rr = ranking.ranks.at[idx, period_columns[right_i]]
+                    if not pd.isna(rr):
+                        out.at[i, "Next Rank"] = int(rr)
+                    break
+                right_i += 1
+
     return out
+
