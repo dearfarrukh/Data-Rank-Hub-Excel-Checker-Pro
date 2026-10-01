@@ -55,10 +55,93 @@ def filter_issues(df: pd.DataFrame, menu: str) -> pd.DataFrame:
         return df[(df["Severity"] == "REVIEW") & (df["Source"] != "Coverage start/end")].copy()
     if menu == "Top-N Risk":
         return df[df["Source"] == "Top-N risk"].copy()
-    if menu == "Start / End Years":
+    if menu in {"Start / End Years", "Start / End Review"}:
         return df[df["Source"] == "Coverage start/end"].copy()
+    if menu == "All Errors":
+        # Start/end coverage candidates are classification/review items, not errors.
+        return df[df["Source"] != "Coverage start/end"].copy()
     return df.copy()
 
+
+
+def filter_top_n_relevant_issues(
+    df: pd.DataFrame,
+    working_df: pd.DataFrame,
+    ranking,
+    top_n: int,
+) -> pd.DataFrame:
+    """Return only issues that can matter to the selected Top-N at the affected period.
+
+    Rules:
+    - Top-N risk rows are always relevant.
+    - Start/end coverage rows are not part of the focused ranking work list.
+    - Dataset-wide structural issues remain visible because they can invalidate any ranking.
+    - Country issues are shown only when the entity is inside Top-N at an affected
+      period, or when adjacent ranking context is inside Top-N for an otherwise
+      unrankable/missing cell.
+    """
+    if df is None or df.empty:
+        return df.copy() if df is not None else pd.DataFrame()
+    if ranking is None or working_df is None or working_df.empty:
+        return df[df["Source"] != "Coverage start/end"].copy()
+
+    period_columns = [str(c) for c in ranking.ranks.columns]
+    global_problems = {
+        "Missing Entity Column", "Blank Entity Name", "Duplicate Period",
+        "Periods Out of Order", "No Period Columns", "Missing Period",
+    }
+
+    keep = []
+    for _, row in df.iterrows():
+        source = str(row.get("Source", ""))
+        problem = str(row.get("Problem", ""))
+        entity = str(row.get("Entity", "")).strip()
+
+        if source == "Coverage start/end":
+            keep.append(False)
+            continue
+        if source == "Top-N risk":
+            keep.append(True)
+            continue
+        if not entity or entity == "Dataset / Structure" or problem in global_problems:
+            keep.append(True)
+            continue
+
+        matches = working_df.index[working_df["Entity"].astype(str).str.strip().eq(entity)]
+        if len(matches) != 1:
+            # Duplicate/ambiguous entity rows are structural; keep them visible.
+            keep.append(str(row.get("Severity", "")) == "MUST FIX")
+            continue
+        idx = matches[0]
+
+        start_i, end_i = _period_span(str(row.get("Period", "")), period_columns)
+        relevant = False
+        rankable_in_span = False
+        if start_i is not None:
+            for j in range(start_i, end_i + 1):
+                raw_rank = ranking.ranks.at[idx, period_columns[j]]
+                if not pd.isna(raw_rank):
+                    rankable_in_span = True
+                    if int(raw_rank) <= int(top_n):
+                        relevant = True
+                        break
+
+        # Only an unrankable affected cell (missing/invalid) may borrow local
+        # ranking context. A normal jump/repeated-value outside Top-N is hidden
+        # even if the country enters Top-N in a later neighboring period.
+        if not relevant and not rankable_in_span:
+            for key in ("Previous Rank", "Current Rank", "Next Rank"):
+                raw = row.get(key)
+                try:
+                    if raw not in (None, "") and not pd.isna(raw) and float(raw) <= int(top_n):
+                        relevant = True
+                        break
+                except Exception:
+                    pass
+
+        keep.append(relevant)
+
+    return df.loc[keep].reset_index(drop=True)
 
 def entity_counts(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
