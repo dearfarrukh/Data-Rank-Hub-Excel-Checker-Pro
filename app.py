@@ -28,6 +28,8 @@ from modules.review_manager import (
     entity_counts,
     filter_issues,
     filter_top_n_relevant_issues,
+    filter_other_country_issues,
+    ever_top_n_entities,
     remove_safe_fill_reviews,
 )
 from modules.series_fill import apply_fill_candidates, find_safe_fill_candidates
@@ -139,7 +141,7 @@ with st.sidebar:
         top_n = int(st.number_input("Custom Top N", min_value=1, max_value=max_top_n, value=min(20, max_top_n), step=1))
     else:
         top_n = int(top_choice.split()[-1])
-    st.caption(f"Main workspace will show only issues relevant to Top {top_n}.")
+    st.caption(f"Any country that enters Top {top_n} in any year stays in the main workspace with all of its issues.")
     data_mode = st.selectbox("Data type", ["Regular Data", "Cumulative Totals"])
 
     with st.expander("Advanced settings", expanded=False):
@@ -201,16 +203,28 @@ raw_action_table = remove_safe_fill_reviews(raw_action_table, safe_fill_candidat
 raw_action_table = add_ranking_context(raw_action_table, working_df, ranking)
 unresolved, resolved = apply_resolutions(raw_action_table, st.session_state.get("resolutions", {}))
 
+ever_top_entities = ever_top_n_entities(working_df, ranking, int(top_n))
 focused_unresolved = filter_top_n_relevant_issues(unresolved, working_df, ranking, int(top_n))
+other_country_unresolved = filter_other_country_issues(unresolved, working_df, ranking, int(top_n))
+
+focused_safe_fill = (
+    safe_fill_candidates[safe_fill_candidates["Entity"].astype(str).str.strip().isin(ever_top_entities)].copy()
+    if not safe_fill_candidates.empty else safe_fill_candidates.copy()
+)
+other_safe_fill = (
+    safe_fill_candidates[~safe_fill_candidates["Entity"].astype(str).str.strip().isin(ever_top_entities)].copy()
+    if not safe_fill_candidates.empty else safe_fill_candidates.copy()
+)
 
 must_fix = int((focused_unresolved["Severity"] == "MUST FIX").sum()) if not focused_unresolved.empty else 0
 must_check = int((focused_unresolved["Severity"] == "MUST CHECK").sum()) if not focused_unresolved.empty else 0
-review_count = int((focused_unresolved["Severity"] == "REVIEW").sum()) if not focused_unresolved.empty else 0
+review_count = int(((focused_unresolved["Severity"] == "REVIEW") & (focused_unresolved["Source"] != "Coverage start/end")).sum()) if not focused_unresolved.empty else 0
+start_end_focus_count = int((focused_unresolved["Source"] == "Coverage start/end").sum()) if not focused_unresolved.empty else 0
 actual_error_count = int(len(focused_unresolved))
 top_risk_count = int((focused_unresolved["Source"] == "Top-N risk").sum()) if not focused_unresolved.empty else 0
 start_end_count = int((unresolved["Source"] == "Coverage start/end").sum()) if not unresolved.empty else 0
 missing_period_count = int((focused_unresolved["Problem"] == "Missing Period").sum()) if not focused_unresolved.empty else 0
-all_data_issue_count = int((unresolved["Source"] != "Coverage start/end").sum()) if not unresolved.empty else 0
+other_country_issue_count = int(len(other_country_unresolved))
 
 core_status = "READY" if must_fix == 0 and must_check == 0 else "REVIEW NEEDED"
 if must_fix:
@@ -226,15 +240,16 @@ user_forced = int((lifecycle_skips["Lifecycle Status"] == "USER_FORCE_CORRECT").
 
 with st.sidebar:
     labels = {
-        f"Top {top_n} Issues": actual_error_count,
+        f"Top {top_n} Countries": actual_error_count,
         "Must Fix": must_fix,
         "Must Check": must_check,
         "Review": review_count,
+        "Start / End Review": start_end_focus_count,
+        "Safe Fill": int(len(focused_safe_fill)),
         "Top-N Risk": top_risk_count,
         "Fixed / Ignored": len(resolved),
         "Download": None,
-        "Advanced: All Data Issues": all_data_issue_count,
-        "Advanced: Start / End Review": start_end_count,
+        "Advanced: Other Countries": other_country_issue_count,
         "Advanced: Historical / Expected": historical_expected + protected_transition + user_forced,
         "Advanced Details": None,
     }
@@ -248,7 +263,7 @@ with st.sidebar:
     st.success("Historical rules active ✓")
     st.caption(f"{historical_expected:,} expected historical blanks + {protected_transition:,} protected transition blanks.")
 
-    st.caption("Safe Fill for the full dataset is available under Advanced: All Data Issues so low-ranked countries do not clutter the Top-N workflow.")
+    st.caption(f"{len(ever_top_entities)} countrie(s) entered Top {top_n} at least once. All of their issues stay in the main workspace.")
 
     if st.button("RECHECK", use_container_width=True):
         st.toast("Dataset rechecked using the current working copy.", icon="🔄")
@@ -265,7 +280,7 @@ with st.container(border=True):
     c4.metric("Status", core_status)
     st.caption(
         f"{layout_label} • {orientation.frequency or 'Unknown frequency'} • Top {top_n} safety: {top_n_safety} • "
-        f"Showing only Top {top_n}-relevant issues • Other data issues are hidden under Advanced"
+        f"Showing all issues for countries that ever entered Top {top_n} • Other countries are hidden under Advanced"
     )
 
 if must_fix:
@@ -280,30 +295,28 @@ else:
 # -----------------------------------------------------------------------------
 # Main menu pages
 # -----------------------------------------------------------------------------
-focused_menu = f"Top {top_n} Issues"
-if menu in {focused_menu, "Must Fix", "Must Check", "Review", "Top-N Risk", "Advanced: All Data Issues", "Advanced: Start / End Review"}:
+focused_menu = f"Top {top_n} Countries"
+if menu in {focused_menu, "Must Fix", "Must Check", "Review", "Start / End Review", "Top-N Risk", "Advanced: Other Countries"}:
     if menu == focused_menu:
         filtered = focused_unresolved.copy()
-    elif menu in {"Must Fix", "Must Check", "Review", "Top-N Risk"}:
+    elif menu in {"Must Fix", "Must Check", "Review", "Start / End Review", "Top-N Risk"}:
         filtered = filter_issues(focused_unresolved, menu)
-    elif menu == "Advanced: All Data Issues":
-        filtered = filter_issues(unresolved, "All Errors")
     else:
-        filtered = filter_issues(unresolved, "Start / End Review")
+        filtered = other_country_unresolved.copy()
     st.subheader(menu)
-    if menu == "Advanced: Start / End Review":
-        st.info("These are not errors. They show where an entity starts or stops having data so you can confirm whether the boundary is intentional or genuinely missing.")
-    elif menu == "Advanced: All Data Issues":
-        st.info("Advanced view: this shows issues across the whole dataset, including countries outside the selected Top-N.")
+    if menu == "Start / End Review":
+        st.info(f"These are start/end coverage reviews only for countries that entered Top {top_n}. They are not automatically errors.")
+    elif menu == "Advanced: Other Countries":
+        st.info(f"Advanced view: these countries never entered Top {top_n}. They are hidden from the main ranking workflow to avoid clutter.")
     if filtered.empty:
         st.success("Nothing to review in this section.")
     else:
-        if menu == "Advanced: Start / End Review":
+        if menu == "Start / End Review":
             st.caption("Open a country to confirm the suggested start/end year or keep it for later research.")
-        elif menu == "Advanced: All Data Issues":
-            st.caption("This is optional full-dataset review. Return to the Top-N views for the main workflow.")
+        elif menu == "Advanced: Other Countries":
+            st.caption(f"Optional review only. These entities never entered Top {top_n}.")
         else:
-            st.caption(f"Only issues relevant to Top {top_n} are shown here. Open a country and fix them one by one.")
+            st.caption(f"All issues for countries that entered Top {top_n} at least once are shown here. Open a country and fix them one by one.")
         counts = entity_counts(filtered)
 
         for _, entity_row in counts.iterrows():
@@ -465,26 +478,23 @@ if menu in {focused_menu, "Must Fix", "Must Check", "Review", "Top-N Risk", "Adv
                         st.session_state["country_complete"] = completed
                         st.toast(f"{entity} marked reviewed.", icon="✅")
 
-        if menu == "Advanced: All Data Issues":
+        if menu == "Advanced: Other Countries" and not other_safe_fill.empty:
             st.divider()
-            st.subheader("Safe Fill — full dataset")
-            if safe_fill_candidates.empty:
-                st.caption("No safe internal gaps are ready for automatic fill.")
-            else:
-                st.caption(f"{len(safe_fill_candidates)} safe internal cell(s) are ready. These may belong to countries outside Top {top_n}.")
-                if st.button("AUTO FILL ALL SAFE GAPS", type="primary", use_container_width=False):
-                    filled_df, logs = apply_fill_candidates(working_df, safe_fill_candidates)
-                    st.session_state["working_df"] = filled_df
-                    st.session_state.setdefault("audit_log", []).extend(logs)
-                    _rerun()
+            st.subheader("Safe Fill — other countries")
+            st.caption(f"{len(other_safe_fill)} safe internal cell(s) belong to countries that never entered Top {top_n}.")
 
-elif menu == "Advanced: Safe Fill":
-    st.subheader("Safe Fill")
-    st.caption("These are internal blanks with valid anchors on both sides, no protected historical transition, and no active Top-N risk. Review the preview, then fill one country or use the sidebar button for all safe cells.")
-    if safe_fill_candidates.empty:
-        st.success("No safe internal gaps are ready for Series Fill.")
+elif menu == "Safe Fill":
+    st.subheader(f"Safe Fill — Top {top_n} countries")
+    st.caption("These are safe internal blanks only for countries that entered the selected Top-N at least once.")
+    if focused_safe_fill.empty:
+        st.success("No safe internal gaps are ready for the selected Top-N countries.")
     else:
-        for entity, group in safe_fill_candidates.groupby("Entity", sort=True):
+        if st.button("AUTO FILL ALL SAFE GAPS FOR TOP-N COUNTRIES", type="primary", use_container_width=False):
+            filled_df, logs = apply_fill_candidates(working_df, focused_safe_fill)
+            st.session_state["working_df"] = filled_df
+            st.session_state.setdefault("audit_log", []).extend(logs)
+            _rerun()
+        for entity, group in focused_safe_fill.groupby("Entity", sort=True):
             with st.expander(f"{entity} ({len(group)} cell{'s' if len(group) != 1 else ''})", expanded=len(safe_fill_candidates) <= 6):
                 show = group[["Period", "New Value", "Previous Anchor", "Previous Value", "Next Anchor", "Next Value", "Method"]].copy()
                 st.dataframe(show, use_container_width=True, hide_index=True)
@@ -605,6 +615,7 @@ elif menu == "Advanced Details":
         "recognized_periods": len(result.period_columns),
         "entities": len(working_df),
         "top_n": int(top_n),
+        "ever_top_n_entities": len(ever_top_entities),
         "top_n_safety": top_n_safety,
         "historical_expected": historical_expected,
         "protected_transition": protected_transition,

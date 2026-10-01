@@ -1,15 +1,13 @@
-# Data Rank Hub Excel Checker Pro — Top-N Focus
+# Data Rank Hub Excel Checker Pro — V1.3 Ever Top-N Workspace
 
-Main workflow is ranking-focused.
+Main workflow rule:
 
-- Quick ranking choices: Top 10, Top 12, Top 15
-- Custom Top N supported
-- Main workspace shows only issues relevant to the selected Top-N at the affected period
-- Missing values that may affect Top-N remain visible even when the current rank is unknown
-- Countries/issues outside the selected Top-N are hidden from the main workflow
-- Full-dataset issues remain available under `Advanced: All Data Issues`
-- Start/End coverage and historical expected blanks stay in Advanced review areas
-- Historical lifecycle protection remains active
-- Manual correction, Force Correct, Series Fill, corrected export, and audit export remain available
+- Choose Top 10, Top 12, Top 15, or Custom Top N.
+- If a country/entity enters that Top N in **any observed period**, **all of its unresolved issues stay in the main workspace**.
+- This includes start/end coverage review, missing values, jumps, repeated values, zeros, invalid values, and Top-N risk.
+- Countries that never enter the selected Top N are moved to **Advanced: Other Countries**.
+- Historical expected blanks remain protected and are not treated as errors.
+- Safe Fill is split so safe gaps for selected Top-N countries remain in the main workflow.
 
-The intent is to certify the ranking used for a Data Rank Hub video without clutter from low-ranked countries that do not affect the selected Top-N.
+Main file: `app.py`
+Branch: `main`
