@@ -27,6 +27,7 @@ from modules.review_manager import (
     clean_display_value,
     entity_counts,
     filter_issues,
+    remove_safe_fill_reviews,
 )
 from modules.series_fill import apply_fill_candidates, find_safe_fill_candidates
 
@@ -171,10 +172,6 @@ coverage_candidates = detect_start_end_candidates(
     user_overrides=st.session_state.get("force_overrides", []),
 )
 
-raw_action_table = build_action_table(result.findings_frame(), risk_table, coverage_candidates)
-raw_action_table = add_ranking_context(raw_action_table, working_df, ranking)
-unresolved, resolved = apply_resolutions(raw_action_table, st.session_state.get("resolutions", {}))
-
 top_n_risk_cells = set()
 if risk_table is not None and not risk_table.empty:
     top_n_risk_cells = {
@@ -189,6 +186,13 @@ safe_fill_candidates = find_safe_fill_candidates(
     user_overrides=st.session_state.get("force_overrides", []),
     excluded_cells=top_n_risk_cells,
 )
+
+raw_action_table = build_action_table(result.findings_frame(), risk_table, coverage_candidates)
+# Safe-fill gaps are actionable, but they are not review errors. Keep them in a
+# separate Safe Fill workspace so Review only contains genuine verification items.
+raw_action_table = remove_safe_fill_reviews(raw_action_table, safe_fill_candidates, result.period_columns)
+raw_action_table = add_ranking_context(raw_action_table, working_df, ranking)
+unresolved, resolved = apply_resolutions(raw_action_table, st.session_state.get("resolutions", {}))
 
 must_fix = int((unresolved["Severity"] == "MUST FIX").sum()) if not unresolved.empty else 0
 must_check = int((unresolved["Severity"] == "MUST CHECK").sum()) if not unresolved.empty else 0
@@ -215,6 +219,7 @@ with st.sidebar:
         "Must Fix": must_fix,
         "Must Check": must_check,
         "Review": review_count,
+        "Safe Fill": len(safe_fill_candidates),
         "Top-N Risk": top_risk_count,
         "Start / End Years": start_end_count,
         "Historical / Expected": historical_expected + protected_transition + user_forced,
@@ -300,6 +305,11 @@ if menu in {"All Errors", "Must Fix", "Must Check", "Review", "Top-N Risk", "Sta
                     severity = str(issue.get("Severity", ""))
                     period = str(issue.get("Period", ""))
                     problem = str(issue.get("Problem", ""))
+                    display_problem = {
+                        "Suspicious Jump": "Large Increase",
+                        "Suspicious Drop": "Large Drop",
+                        "Repeated Consecutive Value": "Repeated Value",
+                    }.get(problem, problem)
                     current = clean_display_value(issue.get("Current Value"))
                     prev = clean_display_value(issue.get("Previous Value"))
                     nxt = clean_display_value(issue.get("Next Value"))
@@ -310,11 +320,11 @@ if menu in {"All Errors", "Must Fix", "Must Check", "Review", "Top-N Risk", "Sta
 
                     with st.container(border=True):
                         if severity == "MUST FIX":
-                            st.markdown(f"### 🔴 {period} — {problem}")
+                            st.markdown(f"### 🔴 {period} — {display_problem}")
                         elif severity == "MUST CHECK":
-                            st.markdown(f"### 🟠 {period} — {problem}")
+                            st.markdown(f"### 🟠 {period} — {display_problem}")
                         else:
-                            st.markdown(f"### 🟡 {period} — {problem}")
+                            st.markdown(f"### 🟡 {period} — {display_problem}")
 
                         source = str(issue.get("Source", ""))
                         why = str(issue.get("Why Flagged", "")).strip()
@@ -438,6 +448,22 @@ if menu in {"All Errors", "Must Fix", "Must Check", "Review", "Top-N Risk", "Sta
                         completed.add(entity)
                         st.session_state["country_complete"] = completed
                         st.toast(f"{entity} marked reviewed.", icon="✅")
+
+elif menu == "Safe Fill":
+    st.subheader("Safe Fill")
+    st.caption("These are internal blanks with valid anchors on both sides, no protected historical transition, and no active Top-N risk. Review the preview, then fill one country or use the sidebar button for all safe cells.")
+    if safe_fill_candidates.empty:
+        st.success("No safe internal gaps are ready for Series Fill.")
+    else:
+        for entity, group in safe_fill_candidates.groupby("Entity", sort=True):
+            with st.expander(f"{entity} ({len(group)} cell{'s' if len(group) != 1 else ''})", expanded=len(safe_fill_candidates) <= 6):
+                show = group[["Period", "New Value", "Previous Anchor", "Previous Value", "Next Anchor", "Next Value", "Method"]].copy()
+                st.dataframe(show, use_container_width=True, hide_index=True)
+                if st.button(f"Fill safe gaps for {entity}", key=f"safe_fill_entity_{entity}", use_container_width=True):
+                    filled_df, logs = apply_fill_candidates(working_df, group)
+                    st.session_state["working_df"] = filled_df
+                    st.session_state.setdefault("audit_log", []).extend(logs)
+                    _rerun()
 
 elif menu == "Historical / Expected":
     st.subheader("Historical / Expected")

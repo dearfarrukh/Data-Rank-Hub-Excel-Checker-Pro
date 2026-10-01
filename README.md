@@ -39,3 +39,11 @@ Historical rules never blindly replace blanks with zero and never automatically 
 - Top-N-risk missing cells are promoted separately to MUST CHECK.
 - Safe Series Fill excludes Top-N-risk cells and non-numeric text errors.
 - Review cards show nearest previous/next values and ranks for internal gaps.
+
+## V1.1.3 Final Polish
+- Safe Series Fill candidates are separated from Review counts.
+- Large Increase and Large Drop are displayed more clearly.
+- Duplicate rebound jump warnings are suppressed for isolated dips.
+- Negative values do not generate duplicate jump warnings.
+- Review cards include clearer previous/next context where available.
+- QA target: Must Fix 1, Must Check 2, Review 5, Top-N Risk 2, Start/End 4, Safe Fill 3 cells on the synthetic v3 QA workbook.
