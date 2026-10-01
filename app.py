@@ -7,6 +7,7 @@ import pandas as pd
 import streamlit as st
 
 from modules.audit_log import make_audit_entry
+from modules.coverage_engine import detect_start_end_candidates
 from modules.correction_manager import (
     FORCE_REASONS,
     add_resolution,
@@ -162,7 +163,15 @@ lifecycle_summary = build_lifecycle_summary(
     working_df, result.period_columns, result.numeric_matrix, lifecycle_rules
 )
 
-raw_action_table = build_action_table(result.findings_frame(), risk_table)
+coverage_candidates = detect_start_end_candidates(
+    working_df,
+    result.period_columns,
+    result.numeric_matrix,
+    lifecycle_rules=lifecycle_rules,
+    user_overrides=st.session_state.get("force_overrides", []),
+)
+
+raw_action_table = build_action_table(result.findings_frame(), risk_table, coverage_candidates)
 raw_action_table = add_ranking_context(raw_action_table, working_df, ranking)
 unresolved, resolved = apply_resolutions(raw_action_table, st.session_state.get("resolutions", {}))
 
@@ -175,8 +184,9 @@ safe_fill_candidates = find_safe_fill_candidates(
 
 must_fix = int((unresolved["Severity"] == "MUST FIX").sum()) if not unresolved.empty else 0
 must_check = int((unresolved["Severity"] == "MUST CHECK").sum()) if not unresolved.empty else 0
-review_count = int((unresolved["Severity"] == "REVIEW").sum()) if not unresolved.empty else 0
+review_count = int(((unresolved["Severity"] == "REVIEW") & (unresolved["Source"] != "Coverage start/end")).sum()) if not unresolved.empty else 0
 top_risk_count = int((unresolved["Source"] == "Top-N risk").sum()) if not unresolved.empty else 0
+start_end_count = int((unresolved["Source"] == "Coverage start/end").sum()) if not unresolved.empty else 0
 missing_period_count = int((unresolved["Problem"] == "Missing Period").sum()) if not unresolved.empty else 0
 
 core_status = "READY" if must_fix == 0 and must_check == 0 else "REVIEW NEEDED"
@@ -198,6 +208,7 @@ with st.sidebar:
         "Must Check": must_check,
         "Review": review_count,
         "Top-N Risk": top_risk_count,
+        "Start / End Years": start_end_count,
         "Historical / Expected": historical_expected + protected_transition + user_forced,
         "Fixed / Ignored": len(resolved),
         "Download": None,
@@ -242,7 +253,7 @@ with st.container(border=True):
     c4.metric("Status", core_status)
     st.caption(
         f"{layout_label} • {orientation.frequency or 'Unknown frequency'} • Top {top_n} safety: {top_n_safety} • "
-        f"Historical expected: {historical_expected:,} • Safe fill ready: {len(safe_fill_candidates):,}"
+        f"Historical expected: {historical_expected:,} • Start/End checks: {start_end_count:,} • Safe fill ready: {len(safe_fill_candidates):,}"
     )
 
 if must_fix:
@@ -257,7 +268,7 @@ else:
 # -----------------------------------------------------------------------------
 # Main menu pages
 # -----------------------------------------------------------------------------
-if menu in {"All Errors", "Must Fix", "Must Check", "Review", "Top-N Risk"}:
+if menu in {"All Errors", "Must Fix", "Must Check", "Review", "Top-N Risk", "Start / End Years"}:
     filtered = filter_issues(unresolved, menu)
     st.subheader(menu)
     if filtered.empty:
@@ -297,43 +308,77 @@ if menu in {"All Errors", "Must Fix", "Must Check", "Review", "Top-N Risk"}:
                         else:
                             st.markdown(f"### 🟡 {period} — {problem}")
 
-                        x1, x2, x3, x4 = st.columns(4)
-                        x1.markdown(f"**Current**  \n{current}")
-                        x2.markdown(f"**Previous**  \n{prev}  \nRank: {prev_rank}")
-                        x3.markdown(f"**Next**  \n{nxt}  \nRank: {next_rank}")
-                        x4.markdown(f"**Top {top_n}**  \nCutoff: {cutoff}  \nCurrent rank: {current_rank}")
-
+                        source = str(issue.get("Source", ""))
                         why = str(issue.get("Why Flagged", "")).strip()
                         action = str(issue.get("What To Do", "")).strip()
-                        if why:
-                            st.caption(f"Why: {why}")
-                        if action:
-                            st.caption(f"Next: {action}")
 
-                        exact_period = period in working_df.columns
-                        candidate_rows = safe_fill_candidates[
-                            safe_fill_candidates["Entity"].eq(str(issue.get("Entity", "")))
-                        ] if not safe_fill_candidates.empty else pd.DataFrame()
-                        exact_candidate = candidate_rows[candidate_rows["Period"].eq(period)] if not candidate_rows.empty else pd.DataFrame()
-
-                        b1, b2, b3, b4 = st.columns(4)
-                        if b1.button("Enter Correct Value", key=f"manual_{issue_id}", disabled=not exact_period, use_container_width=True):
-                            st.session_state["fix_mode"] = f"manual:{issue_id}"
-                        series_disabled = exact_candidate.empty and not (problem == "Internal Gap" and not candidate_rows.empty)
-                        if b2.button("Series Fill", key=f"fill_{issue_id}", disabled=series_disabled, use_container_width=True):
-                            if not exact_candidate.empty:
-                                selected = exact_candidate
+                        if source == "Coverage start/end":
+                            candidate_type = str(issue.get("Candidate Type", ""))
+                            candidate_period = str(issue.get("Candidate Period", ""))
+                            boundary_period = str(issue.get("Boundary Period", ""))
+                            blank_from = str(issue.get("Blank From", ""))
+                            blank_to = str(issue.get("Blank To", ""))
+                            blank_count = clean_display_value(issue.get("Blank Count"))
+                            if candidate_type == "START":
+                                st.markdown(f"**Suggested start year: {candidate_period}**")
+                                st.write(f"Blank before start: **{blank_from}–{blank_to}** ({blank_count} periods)")
+                                st.write(f"First available value: **{nxt}**")
                             else:
-                                selected = candidate_rows
-                            filled_df, logs = apply_fill_candidates(working_df, selected)
-                            st.session_state["working_df"] = filled_df
-                            st.session_state.setdefault("audit_log", []).extend(logs)
-                            _rerun()
-                        if b3.button("Keep / Ignore", key=f"ignore_{issue_id}", use_container_width=True):
-                            _resolve(issue_id, "Keep Original / Ignore", "User reviewed and accepted the original data", str(issue.get("Entity", "")), period)
-                            _rerun()
-                        if b4.button("Force Correct", key=f"force_{issue_id}", disabled=not exact_period, use_container_width=True):
-                            st.session_state["fix_mode"] = f"force:{issue_id}"
+                                st.markdown(f"**Suggested end year: {candidate_period}**")
+                                st.write(f"Blank after end: **{blank_from}–{blank_to}** ({blank_count} periods)")
+                                st.write(f"Last available value: **{prev}**")
+                            if why:
+                                st.caption(why)
+                            if action:
+                                st.caption(action)
+
+                            c1, c2, c3 = st.columns(3)
+                            confirm_label = f"Confirm {'Start' if candidate_type == 'START' else 'End'} Year {candidate_period}"
+                            if c1.button(confirm_label, key=f"confirm_boundary_{issue_id}", type="primary", use_container_width=True):
+                                reason = "Series intentionally starts here" if candidate_type == "START" else "Series intentionally ends here"
+                                scope = "This and all earlier periods" if candidate_type == "START" else "This and all later periods"
+                                note = f"Confirmed {'start' if candidate_type == 'START' else 'end'} year {candidate_period}"
+                                override = build_force_override(str(issue.get("Entity", "")), boundary_period, reason, scope, note)
+                                st.session_state.setdefault("force_overrides", []).append(override)
+                                _resolve(issue_id, confirm_label, note, str(issue.get("Entity", "")), period)
+                                _rerun()
+                            if c2.button("Force Correct", key=f"force_{issue_id}", use_container_width=True):
+                                st.session_state["fix_mode"] = f"force:{issue_id}"
+                            if c3.button("Keep for Review", key=f"keep_review_{issue_id}", use_container_width=True):
+                                st.toast("Left unresolved so you can research it later.", icon="🔎")
+                        else:
+                            x1, x2, x3, x4 = st.columns(4)
+                            x1.markdown(f"**Current**  \n{current}")
+                            x2.markdown(f"**Previous**  \n{prev}  \nRank: {prev_rank}")
+                            x3.markdown(f"**Next**  \n{nxt}  \nRank: {next_rank}")
+                            x4.markdown(f"**Top {top_n}**  \nCutoff: {cutoff}  \nCurrent rank: {current_rank}")
+                            if why:
+                                st.caption(f"Why: {why}")
+                            if action:
+                                st.caption(f"Next: {action}")
+
+                            exact_period = period in working_df.columns
+                            candidate_rows = safe_fill_candidates[
+                                safe_fill_candidates["Entity"].eq(str(issue.get("Entity", "")))
+                            ] if not safe_fill_candidates.empty else pd.DataFrame()
+                            exact_candidate = candidate_rows[candidate_rows["Period"].eq(period)] if not candidate_rows.empty else pd.DataFrame()
+
+                            b1, b2, b3, b4 = st.columns(4)
+                            if b1.button("Enter Correct Value", key=f"manual_{issue_id}", disabled=not exact_period, use_container_width=True):
+                                st.session_state["fix_mode"] = f"manual:{issue_id}"
+                            series_disabled = exact_candidate.empty and not (problem == "Internal Gap" and not candidate_rows.empty)
+                            if b2.button("Series Fill", key=f"fill_{issue_id}", disabled=series_disabled, use_container_width=True):
+                                selected = exact_candidate if not exact_candidate.empty else candidate_rows
+                                filled_df, logs = apply_fill_candidates(working_df, selected)
+                                st.session_state["working_df"] = filled_df
+                                st.session_state.setdefault("audit_log", []).extend(logs)
+                                _rerun()
+                            keep_label = "Keep Blank" if current == "Not available" else "Keep Original"
+                            if b3.button(keep_label, key=f"ignore_{issue_id}", use_container_width=True):
+                                _resolve(issue_id, keep_label, "User reviewed and accepted the original data", str(issue.get("Entity", "")), period)
+                                _rerun()
+                            if b4.button("Force Correct", key=f"force_{issue_id}", disabled=not exact_period, use_container_width=True):
+                                st.session_state["fix_mode"] = f"force:{issue_id}"
 
                         if st.session_state.get("fix_mode") == f"manual:{issue_id}":
                             st.markdown("**Enter corrected numeric value**")
@@ -342,9 +387,7 @@ if menu in {"All Errors", "Must Fix", "Must Check", "Review", "Top-N Risk"}:
                             if s1.button("Save Value", key=f"save_{issue_id}", type="primary", use_container_width=True):
                                 try:
                                     numeric_value = float(value_text.replace(",", "").strip())
-                                    updated, log = apply_manual_value(
-                                        working_df, str(issue.get("Entity", "")), period, numeric_value
-                                    )
+                                    updated, log = apply_manual_value(working_df, str(issue.get("Entity", "")), period, numeric_value)
                                     st.session_state["working_df"] = updated
                                     _append_audit(log)
                                     _rerun()
@@ -367,17 +410,10 @@ if menu in {"All Errors", "Must Fix", "Must Check", "Review", "Top-N Risk"}:
                             note = st.text_input("Optional note / predecessor name", key=f"note_{issue_id}")
                             f1, f2 = st.columns(2)
                             if f1.button("Apply Force Correct", key=f"apply_force_{issue_id}", type="primary", use_container_width=True):
-                                override = build_force_override(
-                                    str(issue.get("Entity", "")), period, reason, scope, note
-                                )
+                                force_period = str(issue.get("Boundary Period", period)) if source == "Coverage start/end" else period
+                                override = build_force_override(str(issue.get("Entity", "")), force_period, reason, scope, note)
                                 st.session_state.setdefault("force_overrides", []).append(override)
-                                _resolve(
-                                    issue_id,
-                                    "Force Correct",
-                                    f"{override['reason']} — {scope}",
-                                    str(issue.get("Entity", "")),
-                                    period,
-                                )
+                                _resolve(issue_id, "Force Correct", f"{override['reason']} — {scope}", str(issue.get("Entity", "")), period)
                                 _rerun()
                             if f2.button("Cancel", key=f"cancel_force_{issue_id}", use_container_width=True):
                                 st.session_state["fix_mode"] = ""
@@ -437,6 +473,7 @@ elif menu == "Download":
         "Protected Transition": protected_transition,
         "User Force Correct": user_forced,
         "Safe Fill Remaining": int(len(safe_fill_candidates)),
+        "Start / End Candidates": int(start_end_count),
     }
 
     corrected_bytes = build_corrected_workbook_bytes(
@@ -454,6 +491,7 @@ elif menu == "Download":
         lifecycle_summary,
         safe_fill_candidates,
         summary,
+        coverage_candidates,
     )
 
     base_name = Path(uploaded_file.name).stem
@@ -508,5 +546,6 @@ elif menu == "Advanced Details":
         "protected_transition": protected_transition,
         "user_force_correct": user_forced,
         "safe_fill_candidates": len(safe_fill_candidates),
+        "start_end_candidates": int(start_end_count),
     })
 
