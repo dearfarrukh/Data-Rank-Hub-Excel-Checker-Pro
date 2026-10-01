@@ -175,11 +175,19 @@ raw_action_table = build_action_table(result.findings_frame(), risk_table, cover
 raw_action_table = add_ranking_context(raw_action_table, working_df, ranking)
 unresolved, resolved = apply_resolutions(raw_action_table, st.session_state.get("resolutions", {}))
 
+top_n_risk_cells = set()
+if risk_table is not None and not risk_table.empty:
+    top_n_risk_cells = {
+        (str(r.get("Entity", "")).strip(), str(r.get("Error Period", "")).strip())
+        for _, r in risk_table.iterrows()
+    }
+
 safe_fill_candidates = find_safe_fill_candidates(
     working_df,
     result.period_columns,
     lifecycle_rules=lifecycle_rules,
     user_overrides=st.session_state.get("force_overrides", []),
+    excluded_cells=top_n_risk_cells,
 )
 
 must_fix = int((unresolved["Severity"] == "MUST FIX").sum()) if not unresolved.empty else 0

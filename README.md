@@ -32,3 +32,10 @@ Historical rules never blindly replace blanks with zero and never automatically 
 - Known lifecycle ranges and existing Force Correct ranges are excluded.
 - One-click **Confirm Start Year / Confirm End Year** creates a documented rule; it does not invent or copy values.
 - Start/End candidates have their own sidebar view and do not inflate ordinary Review counts.
+
+
+## V1.1.2 classification fix
+- Internal gaps default to REVIEW, not automatic MUST CHECK.
+- Top-N-risk missing cells are promoted separately to MUST CHECK.
+- Safe Series Fill excludes Top-N-risk cells and non-numeric text errors.
+- Review cards show nearest previous/next values and ranks for internal gaps.
