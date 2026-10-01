@@ -154,6 +154,19 @@ def build_top_n_risk_table(
 
     for row_index in df.index:
         entity = str(df.loc[row_index, "Entity"]).strip()
+
+        # Start/end coverage takes precedence over Top-N missing-risk logic.
+        # A blank before the first numeric observation (or after the last one) is
+        # a Start/End Year review candidate, not an internal missing value.
+        # This prevents cases such as Belgium starting in 1962 or Brazil in 1957
+        # from being incorrectly promoted to MUST CHECK for 1961/1956.
+        known_positions = [
+            pos for pos, p in enumerate(period_columns)
+            if not pd.isna(numeric_matrix.loc[row_index, p])
+        ]
+        first_known = known_positions[0] if known_positions else None
+        last_known = known_positions[-1] if known_positions else None
+
         for i, period in enumerate(period_columns):
             if not pd.isna(numeric_matrix.loc[row_index, period]):
                 continue
@@ -178,6 +191,12 @@ def build_top_n_risk_table(
                     "Rule": lifecycle_rule.canonical if lifecycle_rule else "",
                     "Why": lifecycle_rule.notes if lifecycle_rule else "",
                 })
+                continue
+
+            if first_known is None:
+                continue
+            if i < first_known or i > last_known:
+                # Coverage engine owns unclassified leading/trailing blanks.
                 continue
 
             risk = evaluate_missing_cell_risk(
