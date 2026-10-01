@@ -1,49 +1,15 @@
-# Data Rank Hub Excel Checker Pro
+# Data Rank Hub Excel Checker Pro — Top-N Focus
 
-Professional modular Streamlit checker for historical ranking datasets.
+Main workflow is ranking-focused.
 
-## Main workflow
+- Quick ranking choices: Top 10, Top 12, Top 15
+- Custom Top N supported
+- Main workspace shows only issues relevant to the selected Top-N at the affected period
+- Missing values that may affect Top-N remain visible even when the current rank is unknown
+- Countries/issues outside the selected Top-N are hidden from the main workflow
+- Full-dataset issues remain available under `Advanced: All Data Issues`
+- Start/End coverage and historical expected blanks stay in Advanced review areas
+- Historical lifecycle protection remains active
+- Manual correction, Force Correct, Series Fill, corrected export, and audit export remain available
 
-`UPLOAD → CHECK → REVIEW BY COUNTRY → FIX → RECHECK → DOWNLOAD`
-
-## V1 Pro features
-
-- Excel / CSV upload
-- Checker and AlienArt orientation auto-detection
-- Annual / monthly / quarterly period support
-- Core structural and numeric checks
-- Period-by-period Top-N risk engine
-- Historical lifecycle protection
-- Country-by-country review workspace
-- Manual correction
-- Keep / Ignore
-- Force Correct with documented reasons and range scope
-- Safe internal Series Fill
-- One-button `AUTO FILL ALL SAFE GAPS`
-- Corrected Excel export in original orientation
-- Audit report + change log
-
-Historical rules never blindly replace blanks with zero and never automatically copy predecessor values into successor-country series.
-
-## V1.1 coverage review
-- Detects unclassified leading blanks as **Start Year Candidate**.
-- Detects unclassified trailing blanks as **End Year Candidate**.
-- Shows the suggested first/last populated period and value.
-- Known lifecycle ranges and existing Force Correct ranges are excluded.
-- One-click **Confirm Start Year / Confirm End Year** creates a documented rule; it does not invent or copy values.
-- Start/End candidates have their own sidebar view and do not inflate ordinary Review counts.
-
-
-## V1.1.2 classification fix
-- Internal gaps default to REVIEW, not automatic MUST CHECK.
-- Top-N-risk missing cells are promoted separately to MUST CHECK.
-- Safe Series Fill excludes Top-N-risk cells and non-numeric text errors.
-- Review cards show nearest previous/next values and ranks for internal gaps.
-
-## V1.1.3 Final Polish
-- Safe Series Fill candidates are separated from Review counts.
-- Large Increase and Large Drop are displayed more clearly.
-- Duplicate rebound jump warnings are suppressed for isolated dips.
-- Negative values do not generate duplicate jump warnings.
-- Review cards include clearer previous/next context where available.
-- QA target: Must Fix 1, Must Check 2, Review 5, Top-N Risk 2, Start/End 4, Safe Fill 3 cells on the synthetic v3 QA workbook.
+The intent is to certify the ranking used for a Data Rank Hub video without clutter from low-ranked countries that do not affect the selected Top-N.
