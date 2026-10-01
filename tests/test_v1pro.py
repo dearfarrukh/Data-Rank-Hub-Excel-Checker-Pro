@@ -259,7 +259,7 @@ def test_start_end_review_is_not_counted_as_all_errors():
     assert len(filter_issues(df, "Start / End Review")) == 1
 
 
-def test_top_n_focus_hides_low_rank_country_issue():
+def test_top_n_focus_hides_country_that_never_enters_top_n():
     from types import SimpleNamespace
     from modules.review_manager import filter_top_n_relevant_issues
     working = pd.DataFrame({
@@ -270,36 +270,56 @@ def test_top_n_focus_hides_low_rank_country_issue():
     ranks = pd.DataFrame({"2000": [1.0, 2.0], "2001": [1.0, 2.0]})
     ranking = SimpleNamespace(ranks=ranks, cutoffs={"2000": 1000, "2001": 1100}, top_n=1)
     issues = pd.DataFrame([
-        {"Severity": "REVIEW", "Entity": "Top", "Period": "2000 → 2001", "Problem": "Suspicious Jump", "Source": "Core check", "Previous Rank": 1, "Current Rank": 1, "Next Rank": None},
-        {"Severity": "REVIEW", "Entity": "Low", "Period": "2000 → 2001", "Problem": "Suspicious Jump", "Source": "Core check", "Previous Rank": 2, "Current Rank": 2, "Next Rank": None},
+        {"Severity": "REVIEW", "Entity": "Top", "Period": "2000 → 2001", "Problem": "Suspicious Jump", "Source": "Core check"},
+        {"Severity": "REVIEW", "Entity": "Low", "Period": "2000 → 2001", "Problem": "Suspicious Jump", "Source": "Core check"},
     ])
     out = filter_top_n_relevant_issues(issues, working, ranking, 1)
     assert out["Entity"].tolist() == ["Top"]
 
 
-def test_top_n_focus_keeps_missing_top_n_risk_even_without_current_rank():
+def test_top_n_focus_keeps_all_issues_for_country_that_ever_enters_top_n():
     from types import SimpleNamespace
     from modules.review_manager import filter_top_n_relevant_issues
-    working = pd.DataFrame({"Entity": ["A", "B"], "2000": [100, 90], "2001": [None, 95]})
-    ranks = pd.DataFrame({"2000": [1.0, 2.0], "2001": [float("nan"), 1.0]})
-    ranking = SimpleNamespace(ranks=ranks, cutoffs={"2000": 100, "2001": 95}, top_n=1)
+    working = pd.DataFrame({
+        "Entity": ["China", "Low"],
+        "1950": [None, 100],
+        "1951": [None, 110],
+        "2000": [1000, 120],
+    })
+    ranks = pd.DataFrame({"1950": [float("nan"), 2.0], "1951": [float("nan"), 2.0], "2000": [1.0, 2.0]})
+    ranking = SimpleNamespace(ranks=ranks, cutoffs={"1950": 100, "1951": 110, "2000": 1000}, top_n=1)
+    issues = pd.DataFrame([
+        {"Severity": "REVIEW", "Entity": "China", "Period": "1950", "Problem": "Start Year Candidate", "Source": "Coverage start/end"},
+        {"Severity": "REVIEW", "Entity": "China", "Period": "1950 → 1951", "Problem": "Zero Run", "Source": "Core check"},
+        {"Severity": "REVIEW", "Entity": "Low", "Period": "1950", "Problem": "Start Year Candidate", "Source": "Coverage start/end"},
+    ])
+    out = filter_top_n_relevant_issues(issues, working, ranking, 1)
+    assert out["Entity"].tolist() == ["China", "China"]
+    assert set(out["Source"]) == {"Coverage start/end", "Core check"}
+
+
+def test_top_n_focus_keeps_issue_even_when_issue_year_is_outside_top_n():
+    from types import SimpleNamespace
+    from modules.review_manager import filter_top_n_relevant_issues
+    working = pd.DataFrame({"Entity": ["A", "B"], "2000": [10, 100], "2010": [200, 100]})
+    ranks = pd.DataFrame({"2000": [2.0, 1.0], "2010": [1.0, 2.0]})
+    ranking = SimpleNamespace(ranks=ranks, cutoffs={"2000": 100, "2010": 200}, top_n=1)
     issues = pd.DataFrame([{
-        "Severity": "MUST CHECK", "Entity": "A", "Period": "2001", "Problem": "Missing value may affect Top-N",
-        "Source": "Top-N risk", "Previous Rank": 1, "Current Rank": None, "Next Rank": None,
+        "Severity": "REVIEW", "Entity": "A", "Period": "2000", "Problem": "Repeated Value", "Source": "Core check"
     }])
     out = filter_top_n_relevant_issues(issues, working, ranking, 1)
     assert len(out) == 1
 
 
-def test_top_n_focus_excludes_start_end_review():
+def test_other_country_filter_contains_only_never_top_n_entities():
     from types import SimpleNamespace
-    from modules.review_manager import filter_top_n_relevant_issues
-    working = pd.DataFrame({"Entity": ["A"], "2000": [100], "2001": [110]})
-    ranks = pd.DataFrame({"2000": [1.0], "2001": [1.0]})
-    ranking = SimpleNamespace(ranks=ranks, cutoffs={"2000": 100, "2001": 110}, top_n=1)
-    issues = pd.DataFrame([{
-        "Severity": "REVIEW", "Entity": "A", "Period": "2000", "Problem": "Start Year Candidate",
-        "Source": "Coverage start/end", "Previous Rank": None, "Current Rank": 1, "Next Rank": None,
-    }])
-    out = filter_top_n_relevant_issues(issues, working, ranking, 1)
-    assert out.empty
+    from modules.review_manager import filter_other_country_issues
+    working = pd.DataFrame({"Entity": ["Top", "Low"], "2000": [100, 10]})
+    ranks = pd.DataFrame({"2000": [1.0, 2.0]})
+    ranking = SimpleNamespace(ranks=ranks, cutoffs={"2000": 100}, top_n=1)
+    issues = pd.DataFrame([
+        {"Severity": "REVIEW", "Entity": "Top", "Period": "2000", "Problem": "X", "Source": "Core check"},
+        {"Severity": "REVIEW", "Entity": "Low", "Period": "2000", "Problem": "Y", "Source": "Core check"},
+    ])
+    out = filter_other_country_issues(issues, working, ranking, 1)
+    assert out["Entity"].tolist() == ["Low"]
