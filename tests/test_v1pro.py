@@ -119,3 +119,30 @@ def test_audit_report_contains_expected_sheets():
     )
     wb = load_workbook(BytesIO(out), read_only=True)
     assert {"Summary", "Unresolved", "Resolved", "Change_Log", "Lifecycle", "Safe_Fill_Preview"}.issubset(set(wb.sheetnames))
+
+
+def test_add_ranking_context_accepts_arrow_string_columns():
+    """Regression: Streamlit Cloud pandas may return Arrow-backed string columns."""
+    import pandas as pd
+    from types import SimpleNamespace
+    from modules.review_manager import add_ranking_context
+
+    try:
+        cutoff_col = pd.Series([""], dtype="string[pyarrow]")
+    except Exception:
+        cutoff_col = pd.Series([""], dtype="string")
+
+    action = pd.DataFrame({
+        "Severity": ["MUST CHECK"],
+        "Entity": ["Belgium"],
+        "Period": ["1961"],
+        "Problem": ["Missing"],
+        "Top-N Cutoff": cutoff_col,
+    })
+    working = pd.DataFrame({"Entity": ["Belgium"], "1961": [100.0]})
+    ranks = pd.DataFrame({"1961": [9.0]})
+    ranking = SimpleNamespace(ranks=ranks, cutoffs={"1961": 75000.0})
+
+    result = add_ranking_context(action, working, ranking)
+    assert result.loc[0, "Current Rank"] == 9
+    assert result.loc[0, "Top-N Cutoff"] == 75000.0
