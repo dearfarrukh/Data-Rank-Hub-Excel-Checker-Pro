@@ -192,3 +192,57 @@ def test_internal_gap_context_shows_anchor_values_and_ranks():
     assert out.iloc[0]["Next Value"] == 120.0
     assert out.iloc[0]["Previous Rank"] == 1
     assert out.iloc[0]["Next Rank"] == 1
+
+
+def test_safe_fill_review_rows_are_removed_from_error_workspace():
+    from modules.review_manager import remove_safe_fill_reviews
+    actions = pd.DataFrame([
+        {
+            "Severity": "REVIEW", "Entity": "Finland", "Period": "1971", "Problem": "Internal Gap",
+            "Current Value": None, "Previous Value": None, "Previous Rank": None, "Next Value": None,
+            "Next Rank": None, "Top-N Cutoff": None, "Why Flagged": "gap", "What To Do": "review", "Source": "Core check",
+        },
+        {
+            "Severity": "REVIEW", "Entity": "Spain", "Period": "1974 → 1975", "Problem": "Suspicious Jump",
+            "Current Value": 1600000, "Previous Value": None, "Previous Rank": None, "Next Value": None,
+            "Next Rank": None, "Top-N Cutoff": None, "Why Flagged": "jump", "What To Do": "review", "Source": "Core check",
+        },
+    ])
+    safe = pd.DataFrame([{"Entity": "Finland", "Period": "1971"}])
+    out = remove_safe_fill_reviews(actions, safe, ["1970", "1971", "1972", "1973", "1974", "1975"])
+    assert len(out) == 1
+    assert out.iloc[0]["Entity"] == "Spain"
+
+
+def test_large_drop_is_detected_and_bounce_back_is_suppressed():
+    from modules.error_checker import CheckerConfig, run_core_checks
+    df = pd.DataFrame({"Entity": ["A"], "1988": [900000], "1989": [120000], "1990": [923000]})
+    findings = run_core_checks(df, CheckerConfig(suspicious_jump_threshold=500)).findings_frame()
+    assert (findings["Category"] == "Suspicious Drop").sum() == 1
+    assert (findings["Category"] == "Suspicious Jump").sum() == 0
+
+
+def test_negative_value_does_not_create_duplicate_jump_warning():
+    from modules.error_checker import CheckerConfig, run_core_checks
+    df = pd.DataFrame({"Entity": ["A"], "1983": [400000], "1984": [-25000], "1985": [412000]})
+    findings = run_core_checks(df, CheckerConfig(suspicious_jump_threshold=500)).findings_frame()
+    assert (findings["Category"] == "Negative Value").sum() == 1
+    assert (findings["Category"] == "Suspicious Jump").sum() == 0
+    assert (findings["Category"] == "Suspicious Drop").sum() == 0
+
+
+def test_jump_context_uses_transition_end_period_for_rank_and_cutoff():
+    from modules.ranking_engine import build_ranking_matrix
+    from modules.review_manager import add_ranking_context
+    df = pd.DataFrame({"Entity": ["A", "B"], "1974": [150000, 200000], "1975": [1600000, 300000], "1976": [1400000, 350000]})
+    numeric = df[["1974", "1975", "1976"]].apply(pd.to_numeric, errors="coerce")
+    ranking = build_ranking_matrix(numeric, 1)
+    actions = pd.DataFrame([{
+        "Severity": "REVIEW", "Entity": "A", "Period": "1974 → 1975", "Problem": "Suspicious Jump",
+        "Current Value": 1600000, "Previous Value": None, "Previous Rank": None, "Next Value": None,
+        "Next Rank": None, "Top-N Cutoff": None, "Why Flagged": "jump", "What To Do": "review", "Source": "Core check",
+    }])
+    out = add_ranking_context(actions, df, ranking)
+    assert out.iloc[0]["Current Rank"] == 1
+    assert out.iloc[0]["Top-N Cutoff"] == 1600000
+    assert out.iloc[0]["Next Value"] == 1400000
