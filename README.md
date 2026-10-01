@@ -20,3 +20,7 @@ Main workflow rule:
 
 Main file: `app.py`
 Branch: `main`
+
+
+## V1.5 Start/End precedence
+Leading blanks before the first populated period and trailing blanks after the last populated period are handled as Start/End Review candidates, never as Top-N missing-value risk. Top-N missing risk is evaluated only inside an established series.
