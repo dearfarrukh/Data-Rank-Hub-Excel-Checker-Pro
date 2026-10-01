@@ -306,6 +306,12 @@ def add_ranking_context(action_table: pd.DataFrame, working_df: pd.DataFrame, ra
             right_i = end_i + 1
             while right_i < len(period_columns) and _numeric_at(idx, right_i) is None:
                 right_i += 1
+        elif problem in {"Suspicious Jump", "Suspicious Drop", "Cumulative Value Decreased"}:
+            # Transition findings are labelled START→END. The card's Current value
+            # belongs to END, so Previous must be the actual START value used by
+            # the finding calculation—not the period before START.
+            left_i = start_i
+            right_i = end_i + 1
         else:
             left_i = start_i - 1
             right_i = end_i + 1
