@@ -176,7 +176,9 @@ def _number_checks(
     findings: list[Finding],
     config: CheckerConfig,
 ) -> None:
-    for pos, row_index in enumerate(df.index):
+    threshold = float(config.suspicious_jump_threshold)
+
+    for row_index in df.index:
         entity = str(df.loc[row_index, "Entity"]).strip()
         row_values = numeric_matrix.loc[row_index].tolist()
 
@@ -201,42 +203,37 @@ def _number_checks(
                     suggestion="Check whether this is genuine or an accidental forward-fill.",
                 )
 
-        previous_numeric = None
-        previous_column = None
-        for column, raw_numeric in zip(period_columns, row_values):
+        # Numeric checks use only truly adjacent periods. Missing/invalid cells break
+        # year-to-year comparisons so the checker does not create jump warnings
+        # across gaps.
+        for i, raw_numeric in enumerate(row_values):
             if pd.isna(raw_numeric):
                 continue
 
             current_numeric = float(raw_numeric)
+            current_column = str(period_columns[i])
+
             if config.check_negative_values and current_numeric < 0:
                 _add(
                     findings, "Negative Value", "REVIEW",
-                    entity=entity, period=str(column), value=current_numeric,
+                    entity=entity, period=current_column, value=current_numeric,
                     details=f"Negative numeric value on data row {row_index + 2}.",
                     suggestion="Confirm whether negative values are valid for this dataset.",
                 )
 
-            if previous_numeric is not None and previous_numeric != 0:
-                change_percent = abs((current_numeric - previous_numeric) / abs(previous_numeric) * 100)
-                if change_percent > float(config.suspicious_jump_threshold):
-                    _add(
-                        findings, "Suspicious Jump", "REVIEW",
-                        entity=entity, period=f"{previous_column} → {column}", value=current_numeric,
-                        details=(
-                            f"Value changed by {change_percent:,.1f}% from "
-                            f"{previous_numeric:,.6g} to {current_numeric:,.6g}."
-                        ),
-                        suggestion="Review this large change against the source or historical context.",
-                    )
+            if i == 0 or pd.isna(row_values[i - 1]):
+                continue
+
+            previous_numeric = float(row_values[i - 1])
+            previous_column = str(period_columns[i - 1])
 
             if (
                 config.data_mode == "Cumulative Totals"
-                and previous_numeric is not None
                 and current_numeric < previous_numeric
             ):
                 _add(
                     findings, "Cumulative Value Decreased", "MUST FIX",
-                    entity=entity, period=f"{previous_column} → {column}", value=current_numeric,
+                    entity=entity, period=f"{previous_column} → {current_column}", value=current_numeric,
                     details=(
                         f"Cumulative value fell from {previous_numeric:,.6g} "
                         f"to {current_numeric:,.6g}."
@@ -244,9 +241,50 @@ def _number_checks(
                     suggestion="Verify the source because cumulative totals normally should not decrease.",
                 )
 
-            previous_numeric = current_numeric
-            previous_column = str(column)
+            # Negative values are already their own review problem; do not create a
+            # second jump warning from or into an invalid negative observation.
+            if previous_numeric < 0 or current_numeric < 0 or previous_numeric == 0:
+                continue
 
+            # Large increase. Suppress a bounce-back warning when the middle value
+            # was an isolated sharp dip and the current value has returned close to
+            # the value two periods earlier. This keeps one useful warning instead
+            # of two warnings for the same outlier.
+            if current_numeric > previous_numeric:
+                increase_percent = (current_numeric - previous_numeric) / abs(previous_numeric) * 100
+                suppress_bounce = False
+                if i >= 2 and not pd.isna(row_values[i - 2]):
+                    two_back = float(row_values[i - 2])
+                    if two_back > 0 and previous_numeric > 0:
+                        prior_drop_reverse = (two_back - previous_numeric) / previous_numeric * 100 if previous_numeric < two_back else 0
+                        returned_close = abs(current_numeric - two_back) / two_back <= 0.25
+                        suppress_bounce = prior_drop_reverse > threshold and returned_close
+                if increase_percent > threshold and not suppress_bounce:
+                    _add(
+                        findings, "Suspicious Jump", "REVIEW",
+                        entity=entity, period=f"{previous_column} → {current_column}", value=current_numeric,
+                        details=(
+                            f"Value increased by {increase_percent:,.1f}% from "
+                            f"{previous_numeric:,.6g} to {current_numeric:,.6g}."
+                        ),
+                        suggestion="Review this large increase against the source or historical context.",
+                    )
+
+            # Large drop. Using the lower value as the denominator makes the
+            # threshold symmetric with a large increase: 900k→120k is a 6.5×
+            # change and is therefore detectable with a 500% threshold.
+            elif 0 < current_numeric < previous_numeric:
+                drop_percent = (previous_numeric - current_numeric) / current_numeric * 100
+                if drop_percent > threshold:
+                    _add(
+                        findings, "Suspicious Drop", "REVIEW",
+                        entity=entity, period=f"{previous_column} → {current_column}", value=current_numeric,
+                        details=(
+                            f"Value dropped by a {drop_percent:,.1f}% reverse-change ratio from "
+                            f"{previous_numeric:,.6g} to {current_numeric:,.6g}."
+                        ),
+                        suggestion="Review this large drop against the source or historical context.",
+                    )
 
 def _build_completeness(df: pd.DataFrame, period_columns: list, numeric_matrix: pd.DataFrame) -> pd.DataFrame:
     rows = []

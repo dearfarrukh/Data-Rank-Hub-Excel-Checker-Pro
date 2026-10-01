@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Iterable
 
 import pandas as pd
 
@@ -93,13 +92,65 @@ def clean_display_value(value) -> str:
     return str(value)
 
 
+def _period_span(label: str, period_columns: list[str]) -> tuple[int | None, int | None]:
+    label = str(label or "").strip()
+    if label in period_columns:
+        i = period_columns.index(label)
+        return i, i
+    if "→" in label:
+        left, right = [x.strip() for x in label.split("→", 1)]
+        if left in period_columns and right in period_columns:
+            return period_columns.index(left), period_columns.index(right)
+    return None, None
+
+
+def remove_safe_fill_reviews(
+    action_table: pd.DataFrame,
+    safe_fill_candidates: pd.DataFrame,
+    period_columns: list,
+) -> pd.DataFrame:
+    """Remove REVIEW/Internal Gap rows that are fully covered by safe-fill cells.
+
+    Safe-fill candidates are a separate workflow, not an error/review count. A gap
+    remains in Review when only part of the gap is safe or no safe candidate exists.
+    """
+    if action_table is None or action_table.empty or safe_fill_candidates is None or safe_fill_candidates.empty:
+        return action_table.copy() if action_table is not None else pd.DataFrame()
+
+    period_labels = [str(c) for c in period_columns]
+    safe_cells = {
+        (str(r.get("Entity", "")).strip(), str(r.get("Period", "")).strip())
+        for _, r in safe_fill_candidates.iterrows()
+    }
+
+    keep = []
+    for _, row in action_table.iterrows():
+        if not (
+            str(row.get("Severity", "")) == "REVIEW"
+            and str(row.get("Problem", "")) == "Internal Gap"
+            and str(row.get("Source", "")) == "Core check"
+        ):
+            keep.append(True)
+            continue
+
+        entity = str(row.get("Entity", "")).strip()
+        start_i, end_i = _period_span(str(row.get("Period", "")), period_labels)
+        if start_i is None:
+            keep.append(True)
+            continue
+        affected = [(entity, period_labels[i]) for i in range(start_i, end_i + 1)]
+        keep.append(not affected or not all(cell in safe_cells for cell in affected))
+
+    return action_table.loc[keep].reset_index(drop=True)
+
+
 def add_ranking_context(action_table: pd.DataFrame, working_df: pd.DataFrame, ranking) -> pd.DataFrame:
     if action_table is None or action_table.empty or ranking is None:
         return action_table.copy() if action_table is not None else pd.DataFrame()
     out = action_table.copy()
 
     # Streamlit Cloud / recent pandas may preserve text columns as Arrow-backed
-    # string arrays. These review fields intentionally mix numbers and blanks.
+    # string arrays. These fields intentionally mix numbers and blanks.
     context_columns = [
         "Current Rank", "Previous Value", "Previous Rank", "Next Value", "Next Rank", "Top-N Cutoff",
     ]
@@ -111,63 +162,81 @@ def add_ranking_context(action_table: pd.DataFrame, working_df: pd.DataFrame, ra
 
     period_columns = [str(c) for c in ranking.ranks.columns]
 
-    def _gap_bounds(label: str):
-        label = str(label or "").strip()
-        if label in period_columns:
-            i = period_columns.index(label)
-            return i, i
-        if "→" in label:
-            left, right = [x.strip() for x in label.split("→", 1)]
-            if left in period_columns and right in period_columns:
-                return period_columns.index(left), period_columns.index(right)
-        return None, None
+    def _numeric_at(idx, pidx):
+        if pidx is None or pidx < 0 or pidx >= len(period_columns):
+            return None
+        value = pd.to_numeric(pd.Series([working_df.at[idx, period_columns[pidx]]]), errors="coerce").iloc[0]
+        return None if pd.isna(value) else float(value)
+
+    def _rank_at(idx, pidx):
+        if pidx is None or pidx < 0 or pidx >= len(period_columns):
+            return None
+        raw = ranking.ranks.at[idx, period_columns[pidx]]
+        return None if pd.isna(raw) else int(raw)
 
     for i, row in out.iterrows():
         entity = str(row.get("Entity", "")).strip()
-        period = str(row.get("Period", "")).strip()
         if not entity:
             continue
         matches = working_df.index[working_df["Entity"].astype(str).str.strip().eq(entity)]
         if len(matches) != 1:
             continue
         idx = matches[0]
-        start_i, end_i = _gap_bounds(period)
+        start_i, end_i = _period_span(str(row.get("Period", "")), period_columns)
         if start_i is None:
             continue
 
-        # Exact/current rank and cutoff use the first affected period.
-        current_period = period_columns[start_i]
-        raw_rank = ranking.ranks.at[idx, current_period]
-        if not pd.isna(raw_rank):
-            out.at[i, "Current Rank"] = int(raw_rank)
-        if row.get("Top-N Cutoff", "") in ("", None) or pd.isna(row.get("Top-N Cutoff", None)):
+        problem = str(row.get("Problem", ""))
+        source = str(row.get("Source", ""))
+
+        # For transitions like 1974→1975, the finding's current value belongs to
+        # the ending period. For ranges/repeated runs it is clearer to anchor the
+        # card to the first affected period.
+        current_i = end_i if problem in {"Suspicious Jump", "Suspicious Drop", "Cumulative Value Decreased"} else start_i
+        current_period = period_columns[current_i]
+
+        raw_rank = _rank_at(idx, current_i)
+        if raw_rank is not None:
+            out.at[i, "Current Rank"] = raw_rank
+
+        existing_cutoff = row.get("Top-N Cutoff", None)
+        empty_cutoff = existing_cutoff in ("", None)
+        try:
+            empty_cutoff = empty_cutoff or pd.isna(existing_cutoff)
+        except Exception:
+            pass
+        if empty_cutoff:
             cutoff = ranking.cutoffs.get(current_period)
             if cutoff is not None:
                 out.at[i, "Top-N Cutoff"] = cutoff
 
-        # For gap cards, show the nearest numeric anchors outside the gap.
-        if str(row.get("Problem", "")) == "Internal Gap":
-            left_i = start_i - 1
-            while left_i >= 0:
-                v = pd.to_numeric(pd.Series([working_df.at[idx, period_columns[left_i]]]), errors="coerce").iloc[0]
-                if not pd.isna(v):
-                    out.at[i, "Previous Value"] = float(v)
-                    rr = ranking.ranks.at[idx, period_columns[left_i]]
-                    if not pd.isna(rr):
-                        out.at[i, "Previous Rank"] = int(rr)
-                    break
-                left_i -= 1
+        # Top-N risk rows already carry carefully chosen nearest anchors.
+        if source == "Top-N risk":
+            continue
 
+        if problem == "Internal Gap":
+            left_i = start_i - 1
+            while left_i >= 0 and _numeric_at(idx, left_i) is None:
+                left_i -= 1
             right_i = end_i + 1
-            while right_i < len(period_columns):
-                v = pd.to_numeric(pd.Series([working_df.at[idx, period_columns[right_i]]]), errors="coerce").iloc[0]
-                if not pd.isna(v):
-                    out.at[i, "Next Value"] = float(v)
-                    rr = ranking.ranks.at[idx, period_columns[right_i]]
-                    if not pd.isna(rr):
-                        out.at[i, "Next Rank"] = int(rr)
-                    break
+            while right_i < len(period_columns) and _numeric_at(idx, right_i) is None:
                 right_i += 1
+        else:
+            left_i = start_i - 1
+            right_i = end_i + 1
+
+        prev_value = _numeric_at(idx, left_i)
+        next_value = _numeric_at(idx, right_i)
+        prev_rank = _rank_at(idx, left_i)
+        next_rank = _rank_at(idx, right_i)
+
+        if prev_value is not None:
+            out.at[i, "Previous Value"] = prev_value
+        if prev_rank is not None:
+            out.at[i, "Previous Rank"] = prev_rank
+        if next_value is not None:
+            out.at[i, "Next Value"] = next_value
+        if next_rank is not None:
+            out.at[i, "Next Rank"] = next_rank
 
     return out
-
