@@ -40,10 +40,15 @@ st.set_page_config(page_title="Data Rank Hub Excel Checker Pro", page_icon="📊
 st.markdown(
     """
     <style>
-    .block-container {padding-top: 1.2rem; padding-bottom: 3rem;}
-    div[data-testid="stMetric"] {background: rgba(120,120,120,.06); border-radius: 14px; padding: 12px;}
+    .block-container {padding-top: 1.15rem; padding-bottom: 3rem; max-width: 1500px;}
+    div[data-testid="stMetric"] {background: rgba(120,120,120,.055); border: 1px solid rgba(120,120,120,.10); border-radius: 14px; padding: 12px 14px;}
+    div[data-testid="stMetricLabel"] {font-weight: 600;}
     .small-muted {color:#777; font-size:0.9rem;}
-    </style>
+    .drh-hero {padding: 0.2rem 0 0.45rem 0;}
+    .drh-hero h1 {margin-bottom: .1rem;}
+    .drh-flow {color:#6b7280; font-size:.92rem; letter-spacing:.02em;}
+    .drh-summary {border:1px solid rgba(120,120,120,.15); border-radius:14px; padding:12px 14px; margin:.35rem 0 .7rem;}
+        </style>
     """,
     unsafe_allow_html=True,
 )
@@ -82,8 +87,11 @@ def _rerun() -> None:
 # -----------------------------------------------------------------------------
 # Header + upload
 # -----------------------------------------------------------------------------
-st.title("Data Rank Hub Excel Checker Pro")
-st.caption("UPLOAD → CHECK → REVIEW BY COUNTRY → FIX → RECHECK → DOWNLOAD")
+st.markdown(
+    """<div class="drh-hero"><h1>Data Rank Hub Excel Checker Pro</h1>
+    <div class="drh-flow">UPLOAD → CHECK → REVIEW BY COUNTRY → FIX → RECHECK → DOWNLOAD</div></div>""",
+    unsafe_allow_html=True,
+)
 
 uploaded_file = st.file_uploader(
     "Upload Excel or CSV",
@@ -225,6 +233,12 @@ top_risk_count = int((focused_unresolved["Source"] == "Top-N risk").sum()) if no
 start_end_count = int((unresolved["Source"] == "Coverage start/end").sum()) if not unresolved.empty else 0
 missing_period_count = int((focused_unresolved["Problem"] == "Missing Period").sum()) if not focused_unresolved.empty else 0
 other_country_issue_count = int(len(other_country_unresolved))
+focused_country_count = int(
+    focused_unresolved["Entity"].replace("", "Dataset / Structure").fillna("Dataset / Structure").nunique()
+) if not focused_unresolved.empty else 0
+other_country_count = int(
+    other_country_unresolved["Entity"].replace("", "Dataset / Structure").fillna("Dataset / Structure").nunique()
+) if not other_country_unresolved.empty else 0
 
 core_status = "READY" if must_fix == 0 and must_check == 0 else "REVIEW NEEDED"
 if must_fix:
@@ -240,7 +254,7 @@ user_forced = int((lifecycle_skips["Lifecycle Status"] == "USER_FORCE_CORRECT").
 
 with st.sidebar:
     labels = {
-        f"Top {top_n} Countries": actual_error_count,
+        f"Top {top_n} Issues": actual_error_count,
         "Must Fix": must_fix,
         "Must Check": must_check,
         "Review": review_count,
@@ -263,7 +277,9 @@ with st.sidebar:
     st.success("Historical rules active ✓")
     st.caption(f"{historical_expected:,} expected historical blanks + {protected_transition:,} protected transition blanks.")
 
-    st.caption(f"{len(ever_top_entities)} countrie(s) entered Top {top_n} at least once. All of their issues stay in the main workspace.")
+    entered_label = "country" if len(ever_top_entities) == 1 else "countries"
+    review_label = "country needs" if focused_country_count == 1 else "countries need"
+    st.caption(f"{len(ever_top_entities)} {entered_label} entered Top {top_n} at least once. {focused_country_count} {review_label} review now.")
 
     if st.button("RECHECK", use_container_width=True):
         st.toast("Dataset rechecked using the current working copy.", icon="🔄")
@@ -277,25 +293,27 @@ with st.container(border=True):
     c1.metric("Must Fix", must_fix)
     c2.metric("Must Check", must_check)
     c3.metric("Review", review_count)
-    c4.metric("Status", core_status)
-    st.caption(
-        f"{layout_label} • {orientation.frequency or 'Unknown frequency'} • Top {top_n} safety: {top_n_safety} • "
-        f"Showing all issues for countries that ever entered Top {top_n} • Other countries are hidden under Advanced"
+    c4.metric("Top-N Safety", top_n_safety)
+    st.markdown(
+        f"<div class='small-muted'>{layout_label} • {orientation.frequency or 'Unknown frequency'} • "
+        f"{focused_country_count} countr{'y' if focused_country_count == 1 else 'ies'} need review • "
+        f"Only countries that ever entered Top {top_n} are shown here.</div>",
+        unsafe_allow_html=True,
     )
 
 if must_fix:
     st.error(f"Start with the {must_fix} MUST FIX item(s).")
 elif must_check:
     st.warning(f"{must_check} item(s) need verification before this dataset is fully ready.")
-elif review_count:
-    st.success("No critical blockers. Review items are optional verification points.")
+elif review_count or start_end_focus_count:
+    st.info("No critical blockers. Review the remaining yellow items if you want to clean up the selected Top-N countries.")
 else:
-    st.success("No unresolved problems found by the active checks.")
+    st.success(f"Top {top_n} workspace is clear. No unresolved issues remain for the selected countries.")
 
 # -----------------------------------------------------------------------------
 # Main menu pages
 # -----------------------------------------------------------------------------
-focused_menu = f"Top {top_n} Countries"
+focused_menu = f"Top {top_n} Issues"
 if menu in {focused_menu, "Must Fix", "Must Check", "Review", "Start / End Review", "Top-N Risk", "Advanced: Other Countries"}:
     if menu == focused_menu:
         filtered = focused_unresolved.copy()
@@ -304,10 +322,12 @@ if menu in {focused_menu, "Must Fix", "Must Check", "Review", "Start / End Revie
     else:
         filtered = other_country_unresolved.copy()
     st.subheader(menu)
+    if menu == focused_menu:
+        st.caption(f"{focused_country_count} countr{'y' if focused_country_count == 1 else 'ies'} currently need review. All issues for countries that ever entered Top {top_n} stay here.")
     if menu == "Start / End Review":
         st.info(f"These are start/end coverage reviews only for countries that entered Top {top_n}. They are not automatically errors.")
     elif menu == "Advanced: Other Countries":
-        st.info(f"Advanced view: these countries never entered Top {top_n}. They are hidden from the main ranking workflow to avoid clutter.")
+        st.info(f"Advanced view: {other_country_count} countr{'y' if other_country_count == 1 else 'ies'} with {other_country_issue_count} issue(s) never entered Top {top_n}. They are hidden from the main ranking workflow to avoid clutter.")
     if filtered.empty:
         st.success("Nothing to review in this section.")
     else:
@@ -316,7 +336,7 @@ if menu in {focused_menu, "Must Fix", "Must Check", "Review", "Start / End Revie
         elif menu == "Advanced: Other Countries":
             st.caption(f"Optional review only. These entities never entered Top {top_n}.")
         else:
-            st.caption(f"All issues for countries that entered Top {top_n} at least once are shown here. Open a country and fix them one by one.")
+            st.caption(f"Open a country to review and fix its issues one by one. Countries that never entered Top {top_n} stay under Advanced.")
         counts = entity_counts(filtered)
 
         for _, entity_row in counts.iterrows():
@@ -616,6 +636,8 @@ elif menu == "Advanced Details":
         "entities": len(working_df),
         "top_n": int(top_n),
         "ever_top_n_entities": len(ever_top_entities),
+        "focused_countries_needing_review": focused_country_count,
+        "focused_issue_count": actual_error_count,
         "top_n_safety": top_n_safety,
         "historical_expected": historical_expected,
         "protected_transition": protected_transition,

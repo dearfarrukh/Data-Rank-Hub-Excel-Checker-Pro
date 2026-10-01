@@ -1,3 +1,12 @@
+
+## V1.4 Final UI Polish
+- Core checker/ranking logic unchanged from V1.3.
+- Main navigation now labels the selected workspace as **Top N Issues** (not countries).
+- Shows how many selected Top-N countries currently need review.
+- Status card emphasizes **Top-N Safety** instead of a truncated generic status.
+- Advanced/other-country wording is clearer and less cluttered.
+- Technical details remain hidden under Advanced Details.
+
 # Data Rank Hub Excel Checker Pro — V1.3 Ever Top-N Workspace
 
 Main workflow rule:
