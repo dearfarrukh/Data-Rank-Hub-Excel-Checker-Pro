@@ -97,8 +97,23 @@ def add_ranking_context(action_table: pd.DataFrame, working_df: pd.DataFrame, ra
     if action_table is None or action_table.empty or ranking is None:
         return action_table.copy() if action_table is not None else pd.DataFrame()
     out = action_table.copy()
-    if "Current Rank" not in out.columns:
-        out["Current Rank"] = ""
+
+    # Streamlit Cloud / recent pandas may preserve text columns as Arrow-backed
+    # string arrays. Ranking context later writes numbers into these columns,
+    # which raises TypeError unless the columns can hold mixed display values.
+    # Keep them as object columns because the review table intentionally mixes
+    # numeric values with blanks / "Not available" display states.
+    ranking_context_columns = [
+        "Current Rank",
+        "Previous Rank",
+        "Next Rank",
+        "Top-N Cutoff",
+    ]
+    for col in ranking_context_columns:
+        if col not in out.columns:
+            out[col] = pd.Series([None] * len(out), index=out.index, dtype="object")
+        else:
+            out[col] = out[col].astype("object")
     for i, row in out.iterrows():
         entity = str(row.get("Entity", "")).strip()
         period = str(row.get("Period", "")).strip()
