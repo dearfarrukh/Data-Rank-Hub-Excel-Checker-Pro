@@ -84,3 +84,27 @@ def test_clean_complete_data_is_top_n_yes():
     risks, _, _ = build_top_n_risk_table(df, core.period_columns, core.numeric_matrix, top_n=1)
     assert risks.empty
     assert classify_top_n_safety(core.findings_frame(), risks) == "YES"
+
+
+def test_leading_blank_before_series_start_is_not_top_n_risk():
+    df = pd.DataFrame({
+        "Entity": ["Belgium", "A", "B"],
+        "1961": [None, 100000, 75000],
+        "1962": [275300, 110000, 80000],
+        "1963": [300000, 120000, 85000],
+    })
+    core = run_core_checks(df)
+    risks, _, _ = build_top_n_risk_table(df, core.period_columns, core.numeric_matrix, top_n=2)
+    assert not ((risks["Entity"] == "Belgium") & (risks["Error Period"] == "1961")).any()
+
+
+def test_trailing_blank_after_series_end_is_not_top_n_risk():
+    df = pd.DataFrame({
+        "Entity": ["Legacy", "A", "B"],
+        "1990": [300000, 100000, 75000],
+        "1991": [275000, 110000, 80000],
+        "1992": [None, 120000, 85000],
+    })
+    core = run_core_checks(df)
+    risks, _, _ = build_top_n_risk_table(df, core.period_columns, core.numeric_matrix, top_n=2)
+    assert not ((risks["Entity"] == "Legacy") & (risks["Error Period"] == "1992")).any()
