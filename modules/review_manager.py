@@ -53,9 +53,11 @@ def filter_issues(df: pd.DataFrame, menu: str) -> pd.DataFrame:
     if menu == "Must Check":
         return df[df["Severity"] == "MUST CHECK"].copy()
     if menu == "Review":
-        return df[df["Severity"] == "REVIEW"].copy()
+        return df[(df["Severity"] == "REVIEW") & (df["Source"] != "Coverage start/end")].copy()
     if menu == "Top-N Risk":
         return df[df["Source"] == "Top-N risk"].copy()
+    if menu == "Start / End Years":
+        return df[df["Source"] == "Coverage start/end"].copy()
     return df.copy()
 
 

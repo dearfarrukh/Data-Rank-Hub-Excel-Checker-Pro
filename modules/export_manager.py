@@ -51,6 +51,7 @@ def build_audit_report_bytes(
     lifecycle_summary: pd.DataFrame,
     fill_candidates: pd.DataFrame,
     summary: dict,
+    coverage_candidates: pd.DataFrame | None = None,
 ) -> bytes:
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -60,4 +61,5 @@ def build_audit_report_bytes(
         pd.DataFrame(audit_log or []).to_excel(writer, sheet_name="Change_Log", index=False)
         lifecycle_summary.to_excel(writer, sheet_name="Lifecycle", index=False)
         fill_candidates.to_excel(writer, sheet_name="Safe_Fill_Preview", index=False)
+        (coverage_candidates if coverage_candidates is not None else pd.DataFrame()).to_excel(writer, sheet_name="Start_End_Candidates", index=False)
     return output.getvalue()

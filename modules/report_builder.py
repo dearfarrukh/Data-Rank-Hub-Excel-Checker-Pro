@@ -32,7 +32,7 @@ def category_summary(findings_df: pd.DataFrame) -> pd.DataFrame:
     return out.sort_values(["__order", "Count", "Category"], ascending=[True, False, True]).drop(columns="__order").reset_index(drop=True)
 
 
-def build_action_table(findings_df: pd.DataFrame, risk_table: pd.DataFrame) -> pd.DataFrame:
+def build_action_table(findings_df: pd.DataFrame, risk_table: pd.DataFrame, coverage_table: pd.DataFrame | None = None) -> pd.DataFrame:
     columns = [
         "Severity", "Entity", "Period", "Problem", "Current Value", "Previous Value", "Previous Rank",
         "Next Value", "Next Rank", "Top-N Cutoff", "Why Flagged", "What To Do", "Source",
@@ -75,7 +75,31 @@ def build_action_table(findings_df: pd.DataFrame, risk_table: pd.DataFrame) -> p
                 "Source": "Top-N risk",
             })
 
-    out = pd.DataFrame(rows, columns=columns)
+    if coverage_table is not None and not coverage_table.empty:
+        for _, item in coverage_table.iterrows():
+            rows.append({
+                "Severity": item.get("Severity", "REVIEW"),
+                "Entity": item.get("Entity", ""),
+                "Period": item.get("Period", ""),
+                "Problem": item.get("Problem", ""),
+                "Current Value": item.get("Current Value", ""),
+                "Previous Value": item.get("Previous Value", ""),
+                "Previous Rank": item.get("Previous Rank", ""),
+                "Next Value": item.get("Next Value", ""),
+                "Next Rank": item.get("Next Rank", ""),
+                "Top-N Cutoff": item.get("Top-N Cutoff", ""),
+                "Why Flagged": item.get("Why Flagged", ""),
+                "What To Do": item.get("What To Do", ""),
+                "Source": item.get("Source", "Coverage start/end"),
+                "Candidate Type": item.get("Candidate Type", ""),
+                "Candidate Period": item.get("Candidate Period", ""),
+                "Boundary Period": item.get("Boundary Period", ""),
+                "Blank From": item.get("Blank From", ""),
+                "Blank To": item.get("Blank To", ""),
+                "Blank Count": item.get("Blank Count", ""),
+            })
+
+    out = pd.DataFrame(rows)
     if out.empty:
         return out
     order = {name: i for i, name in enumerate(SEVERITY_ORDER)}
