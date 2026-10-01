@@ -146,3 +146,49 @@ def test_add_ranking_context_accepts_arrow_string_columns():
     result = add_ranking_context(action, working, ranking)
     assert result.loc[0, "Current Rank"] == 9
     assert result.loc[0, "Top-N Cutoff"] == 75000.0
+
+
+def test_internal_gap_defaults_to_review_not_must_check():
+    from modules.error_checker import CheckerConfig, run_core_checks
+    df = pd.DataFrame({"Entity": ["A"], "2000": [100], "2001": [None], "2002": [120]})
+    findings = run_core_checks(df, CheckerConfig()).findings_frame()
+    gap = findings[findings["Category"].eq("Internal Gap")]
+    assert len(gap) == 1
+    assert gap.iloc[0]["Severity"] == "REVIEW"
+
+
+def test_safe_fill_ignores_invalid_text_and_excluded_topn_cells():
+    from modules.series_fill import find_safe_fill_candidates
+    df = pd.DataFrame({
+        "Entity": ["Bad", "Risk", "Safe"],
+        "2000": [100, 100, 100],
+        "2001": ["BAD_TEXT", None, None],
+        "2002": [120, 120, 120],
+    })
+    out = find_safe_fill_candidates(
+        df,
+        ["2000", "2001", "2002"],
+        lifecycle_rules=[],
+        excluded_cells={("Risk", "2001")},
+    )
+    assert set(zip(out["Entity"], out["Period"])) == {("Safe", "2001")}
+    assert float(out.iloc[0]["New Value"]) == 110.0
+
+
+def test_internal_gap_context_shows_anchor_values_and_ranks():
+    from modules.ranking_engine import build_ranking_matrix
+    from modules.review_manager import add_ranking_context
+    df = pd.DataFrame({"Entity": ["A", "B"], "2000": [100, 90], "2001": [None, 95], "2002": [120, 100]})
+    numeric = df[["2000", "2001", "2002"]].apply(pd.to_numeric, errors="coerce")
+    ranking = build_ranking_matrix(numeric, 1)
+    actions = pd.DataFrame([{\
+        "Severity": "REVIEW", "Entity": "A", "Period": "2001", "Problem": "Internal Gap",\
+        "Current Value": None, "Previous Value": None, "Previous Rank": None,\
+        "Next Value": None, "Next Rank": None, "Top-N Cutoff": None,\
+        "Why Flagged": "gap", "What To Do": "review", "Source": "Core check"\
+    }])
+    out = add_ranking_context(actions, df, ranking)
+    assert out.iloc[0]["Previous Value"] == 100.0
+    assert out.iloc[0]["Next Value"] == 120.0
+    assert out.iloc[0]["Previous Rank"] == 1
+    assert out.iloc[0]["Next Rank"] == 1

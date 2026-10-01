@@ -24,12 +24,12 @@ def test_clean_annual_dataset_has_no_findings():
     assert len(result.completeness) == 2
 
 
-def test_internal_gap_is_must_check_and_fixable():
+def test_internal_gap_is_review_and_fixable():
     df = pd.DataFrame({"Entity": ["A"], "1950": [10], "1951": [None], "1952": [14]})
     result = run_core_checks(df)
     frame = result.findings_frame()
     row = frame.loc[frame["Category"] == "Internal Gap"].iloc[0]
-    assert row["Severity"] == "MUST CHECK"
+    assert row["Severity"] == "REVIEW"
     assert bool(row["Fixable"]) is True
 
 
