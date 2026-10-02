@@ -51,6 +51,29 @@ def _linear(prev: float, nxt: float, i0: int, i1: int, i: int, decimals: int) ->
     return round(value, decimals)
 
 
+def _resolve_dataframe_column(df: pd.DataFrame, requested: object):
+    """Return the real DataFrame column matching a stored period label.
+
+    Excel/checker files may keep annual headers as integers (for example 2018)
+    while preview tables store them as strings ("2018").  Resolve by exact
+    match first, then by normalized period label/string so applying a preview
+    cannot fail with KeyError solely because of header dtype.
+    """
+    if requested in df.columns:
+        return requested
+
+    requested_text = str(requested).strip()
+    requested_token = parse_period(requested)
+    for actual in df.columns:
+        if str(actual).strip() == requested_text:
+            return actual
+        actual_token = parse_period(actual)
+        if requested_token is not None and actual_token is not None and actual_token.key == requested_token.key:
+            return actual
+
+    raise KeyError(f"Period column not found: {requested_text}")
+
+
 def find_safe_fill_candidates(
     df: pd.DataFrame,
     period_columns: list[str],
@@ -130,7 +153,7 @@ def apply_fill_candidates(df: pd.DataFrame, candidates: pd.DataFrame) -> tuple[p
         return out, logs
     for _, row in candidates.iterrows():
         idx = int(row["Row Index"])
-        col = str(row["Column"])
+        col = _resolve_dataframe_column(out, row["Column"])
         original = out.at[idx, col]
         value = float(row["New Value"])
         out.at[idx, col] = value
@@ -236,7 +259,7 @@ def apply_repeated_fill_candidates(df: pd.DataFrame, candidates: pd.DataFrame) -
 
     for _, row in candidates.iterrows():
         idx = int(row["Row Index"])
-        col = str(row["Column"])
+        col = _resolve_dataframe_column(out, row["Column"])
         original = out.at[idx, col]
         value = float(row["New Value"])
         out.at[idx, col] = value
