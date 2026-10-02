@@ -144,3 +144,112 @@ def apply_fill_candidates(df: pd.DataFrame, candidates: pd.DataFrame) -> tuple[p
             method="Linear interpolation",
         ))
     return out, logs
+
+
+def find_repeated_fill_candidates(
+    df: pd.DataFrame,
+    period_columns: list[str],
+    eligible_entities: set[str] | None = None,
+    repeated_threshold: int = 2,
+) -> pd.DataFrame:
+    """Build interpolation candidates for repeated-value runs.
+
+    Safety rules:
+    - Regular repeated non-zero runs only.
+    - The first value in the repeated run is preserved as the left anchor.
+    - Only later duplicate cells in that run are changed.
+    - The period immediately after the run must contain a valid numeric value.
+    - If ``eligible_entities`` is supplied, only those entities are considered.
+
+    Example: 100, 100, 110 -> 100, 105, 110.
+    """
+    from modules.jump_checker import repeated_runs
+
+    rows: list[dict] = []
+    decimals = detect_decimals(df, period_columns)
+    eligible = {str(x).strip() for x in eligible_entities} if eligible_entities is not None else None
+
+    for row_index in df.index:
+        entity = str(df.at[row_index, "Entity"]).strip()
+        if not entity or (eligible is not None and entity not in eligible):
+            continue
+
+        numeric = pd.to_numeric(df.loc[row_index, period_columns], errors="coerce")
+        values = numeric.tolist()
+        for run in repeated_runs(values, int(repeated_threshold)):
+            value = run["value"]
+            if float(value) == 0:
+                continue
+
+            start = int(run["start_index"])
+            end = int(run["end_index"])
+            right = end + 1
+
+            # Repeated-value interpolation needs a real next-period anchor.
+            # We deliberately do not jump across blanks or invalid cells.
+            if right >= len(values) or pd.isna(values[right]):
+                continue
+
+            left_value = float(values[start])
+            right_value = float(values[right])
+            if left_value == right_value:
+                continue
+
+            run_start = str(period_columns[start])
+            run_end = str(period_columns[end])
+            run_label = run_start if run_start == run_end else f"{run_start} → {run_end}"
+
+            # Preserve the first occurrence and interpolate only duplicate cells.
+            for i in range(start + 1, end + 1):
+                new_value = _linear(left_value, right_value, start, right, i, decimals)
+                original = df.at[row_index, period_columns[i]]
+                # Skip no-op changes after rounding.
+                try:
+                    if float(original) == float(new_value):
+                        continue
+                except Exception:
+                    pass
+                rows.append({
+                    "Entity": entity,
+                    "Run Period": run_label,
+                    "Period": str(period_columns[i]),
+                    "Row Index": int(row_index),
+                    "Column": str(period_columns[i]),
+                    "Original": original,
+                    "New Value": new_value,
+                    "Method": "Repeated-value linear interpolation",
+                    "Previous Anchor": str(period_columns[start]),
+                    "Previous Value": left_value,
+                    "Next Anchor": str(period_columns[right]),
+                    "Next Value": right_value,
+                })
+
+    return pd.DataFrame(rows)
+
+
+def apply_repeated_fill_candidates(df: pd.DataFrame, candidates: pd.DataFrame) -> tuple[pd.DataFrame, list[dict]]:
+    """Apply previewed repeated-value interpolation candidates."""
+    out = df.copy()
+    logs: list[dict] = []
+    if candidates is None or candidates.empty:
+        return out, logs
+
+    for _, row in candidates.iterrows():
+        idx = int(row["Row Index"])
+        col = str(row["Column"])
+        original = out.at[idx, col]
+        value = float(row["New Value"])
+        out.at[idx, col] = value
+        logs.append(make_audit_entry(
+            "Repeated Series Fill",
+            entity=str(row["Entity"]),
+            period=str(row["Period"]),
+            original=original,
+            new_value=value,
+            reason=(
+                f"Repeated-value run {row['Run Period']} interpolated between "
+                f"{row['Previous Anchor']} and {row['Next Anchor']}"
+            ),
+            method="Repeated-value linear interpolation",
+        ))
+    return out, logs
