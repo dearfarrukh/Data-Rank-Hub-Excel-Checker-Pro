@@ -349,8 +349,13 @@ if menu in {focused_menu, "Must Fix", "Must Check", "Review", "Start / End Revie
                 label += " ✓"
 
             with st.expander(label, expanded=len(counts) <= 3):
-                for _, issue in entity_issues.iterrows():
+                for issue_row_index, issue in entity_issues.iterrows():
                     issue_id = str(issue["Issue ID"])
+                    # Streamlit widget keys must be unique even when two findings
+                    # have the same logical Issue ID (for example, two blank
+                    # entity-name rows). Keep the logical issue_id for audit /
+                    # resolution tracking, but use a row-specific UI key.
+                    ui_issue_key = f"{issue_id}__row_{issue_row_index}"
                     severity = str(issue.get("Severity", ""))
                     period = str(issue.get("Period", ""))
                     problem = str(issue.get("Problem", ""))
@@ -401,7 +406,7 @@ if menu in {focused_menu, "Must Fix", "Must Check", "Review", "Start / End Revie
 
                             c1, c2, c3 = st.columns(3)
                             confirm_label = f"Confirm {'Start' if candidate_type == 'START' else 'End'} Year {candidate_period}"
-                            if c1.button(confirm_label, key=f"confirm_boundary_{issue_id}", type="primary", use_container_width=True):
+                            if c1.button(confirm_label, key=f"confirm_boundary_{ui_issue_key}", type="primary", use_container_width=True):
                                 reason = "Series intentionally starts here" if candidate_type == "START" else "Series intentionally ends here"
                                 scope = "This and all earlier periods" if candidate_type == "START" else "This and all later periods"
                                 note = f"Confirmed {'start' if candidate_type == 'START' else 'end'} year {candidate_period}"
@@ -409,9 +414,9 @@ if menu in {focused_menu, "Must Fix", "Must Check", "Review", "Start / End Revie
                                 st.session_state.setdefault("force_overrides", []).append(override)
                                 _resolve(issue_id, confirm_label, note, str(issue.get("Entity", "")), period)
                                 _rerun()
-                            if c2.button("Force Correct", key=f"force_{issue_id}", use_container_width=True):
-                                st.session_state["fix_mode"] = f"force:{issue_id}"
-                            if c3.button("Keep for Review", key=f"keep_review_{issue_id}", use_container_width=True):
+                            if c2.button("Force Correct", key=f"force_{ui_issue_key}", use_container_width=True):
+                                st.session_state["fix_mode"] = f"force:{ui_issue_key}"
+                            if c3.button("Keep for Review", key=f"keep_review_{ui_issue_key}", use_container_width=True):
                                 st.toast("Left unresolved so you can research it later.", icon="🔎")
                         else:
                             x1, x2, x3, x4 = st.columns(4)
@@ -431,27 +436,27 @@ if menu in {focused_menu, "Must Fix", "Must Check", "Review", "Start / End Revie
                             exact_candidate = candidate_rows[candidate_rows["Period"].eq(period)] if not candidate_rows.empty else pd.DataFrame()
 
                             b1, b2, b3, b4 = st.columns(4)
-                            if b1.button("Enter Correct Value", key=f"manual_{issue_id}", disabled=not exact_period, use_container_width=True):
-                                st.session_state["fix_mode"] = f"manual:{issue_id}"
+                            if b1.button("Enter Correct Value", key=f"manual_{ui_issue_key}", disabled=not exact_period, use_container_width=True):
+                                st.session_state["fix_mode"] = f"manual:{ui_issue_key}"
                             series_disabled = exact_candidate.empty and not (problem == "Internal Gap" and not candidate_rows.empty)
-                            if b2.button("Series Fill", key=f"fill_{issue_id}", disabled=series_disabled, use_container_width=True):
+                            if b2.button("Series Fill", key=f"fill_{ui_issue_key}", disabled=series_disabled, use_container_width=True):
                                 selected = exact_candidate if not exact_candidate.empty else candidate_rows
                                 filled_df, logs = apply_fill_candidates(working_df, selected)
                                 st.session_state["working_df"] = filled_df
                                 st.session_state.setdefault("audit_log", []).extend(logs)
                                 _rerun()
                             keep_label = "Keep Blank" if current == "Not available" else "Keep Original"
-                            if b3.button(keep_label, key=f"ignore_{issue_id}", use_container_width=True):
+                            if b3.button(keep_label, key=f"ignore_{ui_issue_key}", use_container_width=True):
                                 _resolve(issue_id, keep_label, "User reviewed and accepted the original data", str(issue.get("Entity", "")), period)
                                 _rerun()
-                            if b4.button("Force Correct", key=f"force_{issue_id}", disabled=not exact_period, use_container_width=True):
-                                st.session_state["fix_mode"] = f"force:{issue_id}"
+                            if b4.button("Force Correct", key=f"force_{ui_issue_key}", disabled=not exact_period, use_container_width=True):
+                                st.session_state["fix_mode"] = f"force:{ui_issue_key}"
 
-                        if st.session_state.get("fix_mode") == f"manual:{issue_id}":
+                        if st.session_state.get("fix_mode") == f"manual:{ui_issue_key}":
                             st.markdown("**Enter corrected numeric value**")
-                            value_text = st.text_input("Correct value", key=f"value_{issue_id}", placeholder="Example: 275300")
+                            value_text = st.text_input("Correct value", key=f"value_{ui_issue_key}", placeholder="Example: 275300")
                             s1, s2 = st.columns([1, 1])
-                            if s1.button("Save Value", key=f"save_{issue_id}", type="primary", use_container_width=True):
+                            if s1.button("Save Value", key=f"save_{ui_issue_key}", type="primary", use_container_width=True):
                                 try:
                                     numeric_value = float(value_text.replace(",", "").strip())
                                     updated, log = apply_manual_value(working_df, str(issue.get("Entity", "")), period, numeric_value)
@@ -460,29 +465,29 @@ if menu in {focused_menu, "Must Fix", "Must Check", "Review", "Start / End Revie
                                     _rerun()
                                 except Exception as exc:
                                     st.error(str(exc))
-                            if s2.button("Cancel", key=f"cancel_manual_{issue_id}", use_container_width=True):
+                            if s2.button("Cancel", key=f"cancel_manual_{ui_issue_key}", use_container_width=True):
                                 st.session_state["fix_mode"] = ""
                                 st.rerun()
 
-                        if st.session_state.get("fix_mode") == f"force:{issue_id}":
+                        if st.session_state.get("fix_mode") == f"force:{ui_issue_key}":
                             st.markdown("**Force Correct — explain why this blank/value is valid**")
-                            reason = st.selectbox("Reason", FORCE_REASONS, key=f"reason_{issue_id}")
+                            reason = st.selectbox("Reason", FORCE_REASONS, key=f"reason_{ui_issue_key}")
                             default_scope_index = 0
                             if reason in {"Production not started yet", "Entity did not exist yet", "Covered by predecessor country", "Series intentionally starts here"}:
                                 default_scope_index = 1
                             elif reason == "Series intentionally ends here":
                                 default_scope_index = 2
                             scope_options = ["This period only", "This and all earlier periods", "This and all later periods"]
-                            scope = st.selectbox("Apply to", scope_options, index=default_scope_index, key=f"scope_{issue_id}")
-                            note = st.text_input("Optional note / predecessor name", key=f"note_{issue_id}")
+                            scope = st.selectbox("Apply to", scope_options, index=default_scope_index, key=f"scope_{ui_issue_key}")
+                            note = st.text_input("Optional note / predecessor name", key=f"note_{ui_issue_key}")
                             f1, f2 = st.columns(2)
-                            if f1.button("Apply Force Correct", key=f"apply_force_{issue_id}", type="primary", use_container_width=True):
+                            if f1.button("Apply Force Correct", key=f"apply_force_{ui_issue_key}", type="primary", use_container_width=True):
                                 force_period = str(issue.get("Boundary Period", period)) if source == "Coverage start/end" else period
                                 override = build_force_override(str(issue.get("Entity", "")), force_period, reason, scope, note)
                                 st.session_state.setdefault("force_overrides", []).append(override)
                                 _resolve(issue_id, "Force Correct", f"{override['reason']} — {scope}", str(issue.get("Entity", "")), period)
                                 _rerun()
-                            if f2.button("Cancel", key=f"cancel_force_{issue_id}", use_container_width=True):
+                            if f2.button("Cancel", key=f"cancel_force_{ui_issue_key}", use_container_width=True):
                                 st.session_state["fix_mode"] = ""
                                 st.rerun()
 
