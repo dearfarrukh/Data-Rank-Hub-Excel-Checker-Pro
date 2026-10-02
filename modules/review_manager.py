@@ -245,19 +245,75 @@ def add_ranking_context(action_table: pd.DataFrame, working_df: pd.DataFrame, ra
         else:
             out[col] = out[col].astype("object")
 
-    period_columns = [str(c) for c in ranking.ranks.columns]
+    # IMPORTANT: do not assume working_df and ranking.ranks use identical
+    # column label dtypes. Excel headers can arrive as 1950, "1950",
+    # Timestamp-like values, etc. Ranking context is period-position based,
+    # so we map the two matrices by ordered period position instead of doing
+    # cross-frame label lookups. This avoids Streamlit Cloud KeyError crashes.
+    rank_columns_raw = list(ranking.ranks.columns)
+    rank_period_labels = [str(c).strip() for c in rank_columns_raw]
+
+    working_period_columns = [c for c in working_df.columns if str(c) != "Entity"]
+
+    # If extra metadata columns ever appear, first try an exact string-label
+    # alignment to the ranking periods. Otherwise fall back to the ordered
+    # period columns, which is how the normalized checker view is built.
+    working_by_label = {str(c).strip(): c for c in working_period_columns}
+    aligned_working_columns = []
+    for label in rank_period_labels:
+        aligned_working_columns.append(working_by_label.get(label))
+
+    positional_fallback_ok = len(working_period_columns) >= len(rank_columns_raw)
+
+    def _working_col_at(pidx):
+        if pidx is None or pidx < 0 or pidx >= len(rank_columns_raw):
+            return None
+        col = aligned_working_columns[pidx]
+        if col is not None:
+            return col
+        if positional_fallback_ok and pidx < len(working_period_columns):
+            return working_period_columns[pidx]
+        return None
 
     def _numeric_at(idx, pidx):
-        if pidx is None or pidx < 0 or pidx >= len(period_columns):
+        col = _working_col_at(pidx)
+        if col is None:
             return None
-        value = pd.to_numeric(pd.Series([working_df.at[idx, period_columns[pidx]]]), errors="coerce").iloc[0]
+        try:
+            raw = working_df.at[idx, col]
+        except Exception:
+            return None
+        value = pd.to_numeric(pd.Series([raw]), errors="coerce").iloc[0]
         return None if pd.isna(value) else float(value)
 
     def _rank_at(idx, pidx):
-        if pidx is None or pidx < 0 or pidx >= len(period_columns):
+        if pidx is None or pidx < 0 or pidx >= len(rank_columns_raw):
             return None
-        raw = ranking.ranks.at[idx, period_columns[pidx]]
+        try:
+            # Positional column access is deliberate; it is immune to header
+            # dtype differences between normalized data and rank matrices.
+            row_pos = ranking.ranks.index.get_loc(idx)
+            raw = ranking.ranks.iloc[row_pos, pidx]
+        except Exception:
+            return None
         return None if pd.isna(raw) else int(raw)
+
+    def _cutoff_at(pidx):
+        if pidx is None or pidx < 0 or pidx >= len(rank_columns_raw):
+            return None
+        raw_col = rank_columns_raw[pidx]
+        label = rank_period_labels[pidx]
+        cutoffs = getattr(ranking, "cutoffs", {}) or {}
+        # Support both original dtype keys and normalized string keys.
+        value = cutoffs.get(raw_col)
+        if value is None:
+            value = cutoffs.get(label)
+        if value is None:
+            for key, candidate in cutoffs.items():
+                if str(key).strip() == label:
+                    value = candidate
+                    break
+        return value
 
     for i, row in out.iterrows():
         entity = str(row.get("Entity", "")).strip()
@@ -267,7 +323,7 @@ def add_ranking_context(action_table: pd.DataFrame, working_df: pd.DataFrame, ra
         if len(matches) != 1:
             continue
         idx = matches[0]
-        start_i, end_i = _period_span(str(row.get("Period", "")), period_columns)
+        start_i, end_i = _period_span(str(row.get("Period", "")), rank_period_labels)
         if start_i is None:
             continue
 
@@ -278,7 +334,6 @@ def add_ranking_context(action_table: pd.DataFrame, working_df: pd.DataFrame, ra
         # the ending period. For ranges/repeated runs it is clearer to anchor the
         # card to the first affected period.
         current_i = end_i if problem in {"Suspicious Jump", "Suspicious Drop", "Cumulative Value Decreased"} else start_i
-        current_period = period_columns[current_i]
 
         raw_rank = _rank_at(idx, current_i)
         if raw_rank is not None:
@@ -291,7 +346,7 @@ def add_ranking_context(action_table: pd.DataFrame, working_df: pd.DataFrame, ra
         except Exception:
             pass
         if empty_cutoff:
-            cutoff = ranking.cutoffs.get(current_period)
+            cutoff = _cutoff_at(current_i)
             if cutoff is not None:
                 out.at[i, "Top-N Cutoff"] = cutoff
 
@@ -304,14 +359,8 @@ def add_ranking_context(action_table: pd.DataFrame, working_df: pd.DataFrame, ra
             while left_i >= 0 and _numeric_at(idx, left_i) is None:
                 left_i -= 1
             right_i = end_i + 1
-            while right_i < len(period_columns) and _numeric_at(idx, right_i) is None:
+            while right_i < len(rank_columns_raw) and _numeric_at(idx, right_i) is None:
                 right_i += 1
-        elif problem in {"Suspicious Jump", "Suspicious Drop", "Cumulative Value Decreased"}:
-            # Transition findings are labelled START→END. The card's Current value
-            # belongs to END, so Previous must be the actual START value used by
-            # the finding calculation—not the period before START.
-            left_i = start_i
-            right_i = end_i + 1
         else:
             left_i = start_i - 1
             right_i = end_i + 1
