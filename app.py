@@ -32,7 +32,12 @@ from modules.review_manager import (
     ever_top_n_entities,
     remove_safe_fill_reviews,
 )
-from modules.series_fill import apply_fill_candidates, find_safe_fill_candidates
+from modules.series_fill import (
+    apply_fill_candidates,
+    apply_repeated_fill_candidates,
+    find_repeated_fill_candidates,
+    find_safe_fill_candidates,
+)
 
 
 st.set_page_config(page_title="Data Rank Hub Excel Checker Pro", page_icon="📊", layout="wide")
@@ -222,6 +227,16 @@ focused_safe_fill = (
 other_safe_fill = (
     safe_fill_candidates[~safe_fill_candidates["Entity"].astype(str).str.strip().isin(ever_top_entities)].copy()
     if not safe_fill_candidates.empty else safe_fill_candidates.copy()
+)
+
+# Repeated-value Series Fill is intentionally limited to entities that have
+# entered the selected Top-N at least once. It never touches Advanced-only
+# countries. The user sees a preview and must explicitly apply the change.
+repeated_fill_candidates = find_repeated_fill_candidates(
+    working_df,
+    result.period_columns,
+    eligible_entities=ever_top_entities,
+    repeated_threshold=int(repeated_threshold),
 )
 
 must_fix = int((focused_unresolved["Severity"] == "MUST FIX").sum()) if not focused_unresolved.empty else 0
@@ -435,22 +450,60 @@ if menu in {focused_menu, "Must Fix", "Must Check", "Review", "Start / End Revie
                             ] if not safe_fill_candidates.empty else pd.DataFrame()
                             exact_candidate = candidate_rows[candidate_rows["Period"].eq(period)] if not candidate_rows.empty else pd.DataFrame()
 
+                            repeated_candidate = pd.DataFrame()
+                            if problem == "Repeated Consecutive Value" and not repeated_fill_candidates.empty:
+                                repeated_candidate = repeated_fill_candidates[
+                                    repeated_fill_candidates["Entity"].eq(str(issue.get("Entity", "")))
+                                    & repeated_fill_candidates["Run Period"].eq(period)
+                                ].copy()
+
                             b1, b2, b3, b4 = st.columns(4)
                             if b1.button("Enter Correct Value", key=f"manual_{ui_issue_key}", disabled=not exact_period, use_container_width=True):
                                 st.session_state["fix_mode"] = f"manual:{ui_issue_key}"
-                            series_disabled = exact_candidate.empty and not (problem == "Internal Gap" and not candidate_rows.empty)
-                            if b2.button("Series Fill", key=f"fill_{ui_issue_key}", disabled=series_disabled, use_container_width=True):
-                                selected = exact_candidate if not exact_candidate.empty else candidate_rows
-                                filled_df, logs = apply_fill_candidates(working_df, selected)
-                                st.session_state["working_df"] = filled_df
-                                st.session_state.setdefault("audit_log", []).extend(logs)
-                                _rerun()
+
+                            if problem == "Repeated Consecutive Value":
+                                repeated_disabled = repeated_candidate.empty or menu == "Advanced: Other Countries"
+                                if b2.button("Repeated Series Fill", key=f"repeat_fill_{ui_issue_key}", disabled=repeated_disabled, use_container_width=True):
+                                    st.session_state["fix_mode"] = f"repeat_fill:{ui_issue_key}"
+                            else:
+                                series_disabled = exact_candidate.empty and not (problem == "Internal Gap" and not candidate_rows.empty)
+                                if b2.button("Series Fill", key=f"fill_{ui_issue_key}", disabled=series_disabled, use_container_width=True):
+                                    selected = exact_candidate if not exact_candidate.empty else candidate_rows
+                                    filled_df, logs = apply_fill_candidates(working_df, selected)
+                                    st.session_state["working_df"] = filled_df
+                                    st.session_state.setdefault("audit_log", []).extend(logs)
+                                    _rerun()
+
                             keep_label = "Keep Blank" if current == "Not available" else "Keep Original"
                             if b3.button(keep_label, key=f"ignore_{ui_issue_key}", use_container_width=True):
                                 _resolve(issue_id, keep_label, "User reviewed and accepted the original data", str(issue.get("Entity", "")), period)
                                 _rerun()
                             if b4.button("Force Correct", key=f"force_{ui_issue_key}", disabled=not exact_period, use_container_width=True):
                                 st.session_state["fix_mode"] = f"force:{ui_issue_key}"
+
+                        if st.session_state.get("fix_mode") == f"repeat_fill:{ui_issue_key}":
+                            st.markdown("**Repeated Series Fill Preview**")
+                            st.caption(
+                                f"Only this repeated run for an entity that entered Top {top_n} will be changed. "
+                                "The first repeated value stays as the anchor."
+                            )
+                            if repeated_candidate.empty:
+                                st.warning("This repeated run is not safe for interpolation because a valid next-period anchor is not available.")
+                            else:
+                                preview_cols = [
+                                    "Period", "Original", "New Value",
+                                    "Previous Anchor", "Previous Value", "Next Anchor", "Next Value",
+                                ]
+                                st.dataframe(repeated_candidate[preview_cols], use_container_width=True, hide_index=True)
+                                r1, r2 = st.columns(2)
+                                if r1.button("Apply Repeated Series Fill", key=f"apply_repeat_fill_{ui_issue_key}", type="primary", use_container_width=True):
+                                    filled_df, logs = apply_repeated_fill_candidates(working_df, repeated_candidate)
+                                    st.session_state["working_df"] = filled_df
+                                    st.session_state.setdefault("audit_log", []).extend(logs)
+                                    _rerun()
+                                if r2.button("Cancel", key=f"cancel_repeat_fill_{ui_issue_key}", use_container_width=True):
+                                    st.session_state["fix_mode"] = ""
+                                    st.rerun()
 
                         if st.session_state.get("fix_mode") == f"manual:{ui_issue_key}":
                             st.markdown("**Enter corrected numeric value**")
